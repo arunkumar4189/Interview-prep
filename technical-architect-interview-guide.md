@@ -1,7 +1,7 @@
 # Technical Architect Interview Guide
 
 > Comprehensive interview preparation guide with **detailed spoken answers**, real-world examples, trade-off analysis, and sample programs.  
-> Stack emphasis: Node.js, Java, AWS, microservices, MongoDB, Redis, ElasticSearch, Temporal/Airflow.
+> Stack emphasis: Node.js, Java, AWS, microservices, MongoDB, Redis, ElasticSearch, Temporal/Airflow, RabbitMQ, Kafka.
 
 ---
 
@@ -11,20 +11,21 @@
 2. [Architecture Fundamentals](#2-architecture-fundamentals)
 3. [Microservices & Cloud-Native AWS](#3-microservices--cloud-native-aws)
 4. [Distributed Systems](#4-distributed-systems)
-5. [Workflow Orchestration (Airflow vs Temporal)](#5-workflow-orchestration-airflow-vs-temporal)
-6. [MongoDB](#6-mongodb)
-7. [ElasticSearch / OpenSearch](#7-elasticsearch--opensearch)
-8. [Redis (Distributed Cache)](#8-redis-distributed-cache)
-9. [Algorithms & Data Structures](#9-algorithms--data-structures)
-10. [Node.js](#10-nodejs)
-11. [Java](#11-java)
-12. [Design Patterns & SOLID](#12-design-patterns--solid)
-13. [Testing, TDD & Agile](#13-testing-tdd--agile)
-14. [Observability (Datadog)](#14-observability-datadog)
-15. [DevOps: Docker, Kubernetes, Jenkins](#15-devops-docker-kubernetes-jenkins)
-16. [System Design Walkthroughs](#16-system-design-walkthroughs)
-17. [Behavioral & Communication](#17-behavioral--communication)
-18. [Quick Reference Cheat Sheet](#18-quick-reference-cheat-sheet)
+5. [Event-Driven Architecture (RabbitMQ & Kafka)](#5-event-driven-architecture-rabbitmq--kafka)
+6. [Workflow Orchestration (Airflow vs Temporal)](#6-workflow-orchestration-airflow-vs-temporal)
+7. [MongoDB](#7-mongodb)
+8. [ElasticSearch / OpenSearch](#8-elasticsearch--opensearch)
+9. [Redis (Distributed Cache)](#9-redis-distributed-cache)
+10. [Algorithms & Data Structures](#10-algorithms--data-structures)
+11. [Node.js](#11-nodejs)
+12. [Java](#12-java)
+13. [Design Patterns & SOLID](#13-design-patterns--solid)
+14. [Testing, TDD & Agile](#14-testing-tdd--agile)
+15. [Observability (Datadog)](#15-observability-datadog)
+16. [DevOps: Docker, Kubernetes, Jenkins](#16-devops-docker-kubernetes-jenkins)
+17. [System Design Walkthroughs](#17-system-design-walkthroughs)
+18. [Behavioral & Communication](#18-behavioral--communication)
+19. [Quick Reference Cheat Sheet](#19-quick-reference-cheat-sheet)
 
 ---
 
@@ -404,7 +405,511 @@ const limiter = new TokenBucket(100, 100);
 
 ---
 
-## 5. Workflow Orchestration (Airflow vs Temporal)
+## 5. Event-Driven Architecture (RabbitMQ & Kafka)
+
+### What Is Event-Driven Architecture?
+
+In **event-driven architecture (EDA)**, services communicate by **producing and consuming events** instead of calling each other synchronously. An event is a fact that already happened — `OrderPlaced`, `PaymentCharged`, `InventoryReserved` — not a command asking another service to do something.
+
+```
+Synchronous (request/response):
+  Order Service ──HTTP──► Inventory Service ──HTTP──► Payment Service
+  (caller waits; failures cascade; tight coupling)
+
+Event-driven (async):
+  Order Service ──publishes──► Broker ──consumes──► Inventory Service
+                              │
+                              └──consumes──► Payment Service
+                              └──consumes──► Notification Service
+  (producer doesn't wait; consumers scale independently; loose coupling)
+```
+
+### Core Concepts
+
+| Concept | Meaning |
+|---------|---------|
+| **Producer / Publisher** | Service that emits events after a state change |
+| **Consumer / Subscriber** | Service that reacts to events |
+| **Broker / Bus** | Middleware that stores and routes events (RabbitMQ, Kafka, SQS, SNS) |
+| **Event** | Immutable record of something that happened (past tense) |
+| **Command** | Request to do something (imperative) — different from an event |
+| **Topic / Exchange / Queue** | Routing and storage constructs (names vary by broker) |
+| **Consumer group** | Set of consumers that share work for the same event stream |
+| **At-least-once delivery** | Events may be delivered more than once → consumers must be **idempotent** |
+| **Ordering** | Guarantees about sequence (per-key, per-queue, or none) |
+| **Dead Letter Queue (DLQ)** | Where poison messages go after max retries |
+
+### Why Architects Choose EDA
+
+| Benefit | Explanation |
+|---------|-------------|
+| **Loose coupling** | Order service doesn't know who listens — add Notification later without changing Order |
+| **Independent scaling** | Spike in email volume? Scale email consumers only |
+| **Resilience** | If payment is down, events queue up; when it recovers, it catches up |
+| **Auditability** | Event log is a natural audit trail of what happened |
+| **Fan-out** | One event → many consumers (search index, analytics, email, fraud) |
+
+| Cost / Risk | Mitigation |
+|-------------|------------|
+| Eventual consistency | Design UI and SLAs for lag; use read-your-writes where needed |
+| Harder debugging | Correlation IDs, distributed traces, event schemas |
+| Duplicate processing | Idempotency keys + dedup tables |
+| Schema evolution | Version events; use Avro/Protobuf + schema registry |
+| Operational complexity | Start with managed brokers (MSK, CloudAMQP, Amazon MQ) |
+
+### Event Styles: Notification vs Event-Carried State Transfer
+
+| Style | Payload | Use When |
+|-------|---------|----------|
+| **Thin notification** | `{ "orderId": "123", "type": "OrderPlaced" }` | Consumer should fetch latest state; avoid large payloads |
+| **Event-carried state** | Full order snapshot in the event | Consumer shouldn't call back; offline processing; audit |
+| **Domain event** | Business meaning + key fields | Cross-service choreography (saga) |
+| **Integration event** | Stable contract for external systems | Public APIs, partner integrations |
+
+---
+
+### RabbitMQ vs Kafka — Architect Decision Table
+
+| Dimension | RabbitMQ | Kafka |
+|-----------|----------|-------|
+| **Model** | Message broker (queues + exchanges) | Distributed log (topics + partitions) |
+| **Message lifetime** | Deleted after consumer ACKs | Retained for hours/days/weeks (configurable) |
+| **Consumption** | Competing consumers pull from a queue | Consumer groups read from partitions; offset-based |
+| **Replay** | Hard — message is gone after ACK | Easy — reset offset and re-read history |
+| **Ordering** | Per-queue (or priority queues) | Per-partition (key → same partition) |
+| **Throughput** | High (tens of thousands msg/sec) | Very high (millions msg/sec with partitions) |
+| **Latency** | Very low (milliseconds) | Low (ms), optimized for throughput |
+| **Routing** | Rich (direct, topic, fanout, headers exchanges) | Topic + partition key; filters in consumers |
+| **Best for** | Task queues, RPC-style work, complex routing, classic microservices messaging | Event streaming, analytics, CDC, replay, many independent consumers |
+| **Ops complexity** | Moderate | Higher (ZooKeeper/KRaft, partitions, rebalancing) |
+
+**Interview one-liner:** *"RabbitMQ is a smart broker that routes and forgets after delivery; Kafka is a dumb durable log that remembers so many consumers can read and replay independently."*
+
+---
+
+### Example 1: Order Fulfillment with RabbitMQ
+
+**Business scenario:** E-commerce checkout. When an order is placed, inventory must reserve stock, payment must charge the card, and email must notify the customer. Services should not call each other over HTTP in a chain.
+
+#### Topology
+
+```
+Order Service
+    │ publishes OrderPlaced
+    ▼
+┌─────────────────────────────────────────────────────┐
+│  RabbitMQ                                            │
+│  Exchange: orders.events  (type: topic)              │
+│       │                                              │
+│       ├── routing key order.placed                   │
+│       │      ├── Queue: inventory.reserve            │
+│       │      ├── Queue: payment.charge               │
+│       │      └── Queue: email.notify                 │
+│       │                                              │
+│       └── DLX: orders.dlx → Queue: orders.dead       │
+└─────────────────────────────────────────────────────┘
+    │                    │                    │
+    ▼                    ▼                    ▼
+Inventory Service   Payment Service    Email Service
+(ACK after reserve) (ACK after charge) (ACK after send)
+```
+
+#### Why RabbitMQ here?
+
+- Classic **work distribution** — each message should be processed once by one worker of each type
+- **Complex routing** — topic exchange can route `order.placed`, `order.cancelled`, `order.refunded` to different queues
+- **Low latency** task handoff between services
+- Messages don't need long retention once processed — ACK deletes them
+- Dead-letter exchange handles poison messages cleanly
+
+#### Event Payload
+
+```json
+{
+  "eventId": "evt_7f3a2c",
+  "eventType": "OrderPlaced",
+  "occurredAt": "2024-06-15T10:30:00Z",
+  "correlationId": "req_abc123",
+  "data": {
+    "orderId": "ORD-2024-001234",
+    "userId": "u123",
+    "items": [
+      { "productId": "p456", "qty": 1, "price": 79.99 }
+    ],
+    "total": 79.99,
+    "currency": "USD"
+  }
+}
+```
+
+#### Java Producer (Spring AMQP)
+
+```java
+@Service
+public class OrderEventPublisher {
+  private final RabbitTemplate rabbitTemplate;
+  private final ObjectMapper objectMapper;
+
+  public OrderEventPublisher(RabbitTemplate rabbitTemplate, ObjectMapper objectMapper) {
+    this.rabbitTemplate = rabbitTemplate;
+    this.objectMapper = objectMapper;
+  }
+
+  public void publishOrderPlaced(Order order) {
+    OrderPlacedEvent event = new OrderPlacedEvent(
+        UUID.randomUUID().toString(),
+        "OrderPlaced",
+        Instant.now().toString(),
+        order.getCorrelationId(),
+        new OrderPlacedData(order.getId(), order.getUserId(),
+            order.getItems(), order.getTotal(), order.getCurrency())
+    );
+
+    rabbitTemplate.convertAndSend(
+        "orders.events",          // exchange
+        "order.placed",           // routing key
+        event,
+        message -> {
+          message.getMessageProperties().setContentType("application/json");
+          message.getMessageProperties().setMessageId(event.eventId());
+          message.getMessageProperties().setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+          return message;
+        }
+    );
+  }
+}
+
+// RabbitMQ topology (exchange, queues, DLX, bindings)
+@Configuration
+public class RabbitConfig {
+  @Bean
+  TopicExchange ordersEventsExchange() {
+    return new TopicExchange("orders.events", true, false);
+  }
+
+  @Bean
+  FanoutExchange ordersDlx() {
+    return new FanoutExchange("orders.dlx", true, false);
+  }
+
+  @Bean
+  Queue inventoryReserveQueue() {
+    return QueueBuilder.durable("inventory.reserve")
+        .deadLetterExchange("orders.dlx")
+        .ttl(60_000)
+        .build();
+  }
+
+  @Bean
+  Binding inventoryBinding(Queue inventoryReserveQueue, TopicExchange ordersEventsExchange) {
+    return BindingBuilder.bind(inventoryReserveQueue)
+        .to(ordersEventsExchange)
+        .with("order.placed");
+  }
+
+  @Bean
+  Queue ordersDeadQueue() {
+    return QueueBuilder.durable("orders.dead").build();
+  }
+
+  @Bean
+  Binding deadLetterBinding(Queue ordersDeadQueue, FanoutExchange ordersDlx) {
+    return BindingBuilder.bind(ordersDeadQueue).to(ordersDlx);
+  }
+}
+```
+
+#### Java Consumer — Inventory (with ACK, retry, DLQ)
+
+```java
+@Service
+public class InventoryReserveListener {
+  private final InventoryService inventoryService;
+  private final ObjectMapper objectMapper;
+
+  public InventoryReserveListener(InventoryService inventoryService, ObjectMapper objectMapper) {
+    this.inventoryService = inventoryService;
+    this.objectMapper = objectMapper;
+  }
+
+  @RabbitListener(queues = "inventory.reserve", ackMode = "MANUAL")
+  public void onOrderPlaced(Message message, Channel channel) throws Exception {
+    long tag = message.getMessageProperties().getDeliveryTag();
+    try {
+      OrderPlacedEvent event = objectMapper.readValue(message.getBody(), OrderPlacedEvent.class);
+      inventoryService.reserveStock(event.data()); // idempotent by orderId
+      channel.basicAck(tag, false);                // remove from queue
+    } catch (Exception ex) {
+      // nack without requeue → dead-letter exchange
+      channel.basicNack(tag, false, false);
+      throw ex;
+    }
+  }
+}
+
+// Fair dispatch — don't overwhelm one worker
+@Bean
+public RabbitListenerContainerFactory<?> rabbitListenerContainerFactory(
+    ConnectionFactory connectionFactory) {
+  SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+  factory.setConnectionFactory(connectionFactory);
+  factory.setPrefetchCount(10);
+  factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+  return factory;
+}
+```
+
+#### Failure Handling with RabbitMQ
+
+| Failure | Behavior |
+|---------|----------|
+| Consumer crash mid-processing | Message not ACK'd → redelivered to another consumer |
+| Poison message (always fails) | After max retries / nack → DLQ `orders.dead` → alert + manual inspect |
+| Payment service down | Messages accumulate in `payment.charge` queue → catch up when healthy |
+| Duplicate delivery | `reserveStock` checks `reservations` table by `orderId` (unique constraint) |
+
+#### Q: Explain event-driven architecture using RabbitMQ with a real example.
+
+> **Detailed Answer:** Event-driven architecture means services react to facts that already happened instead of calling each other synchronously. In our e-commerce platform, when checkout succeeds, the Order Service does not HTTP-call Inventory, Payment, and Email. It publishes an `OrderPlaced` event to a RabbitMQ topic exchange called `orders.events` with routing key `order.placed`.
+>
+> RabbitMQ then **fans the same event out** to three durable queues: `inventory.reserve`, `payment.charge`, and `email.notify`. Each queue has its own competing consumers. Inventory workers reserve stock; Payment workers charge Stripe; Email workers send confirmation. The Order Service does not wait — it returns `202 Accepted` (or confirms after local DB commit + outbox publish) and continues.
+>
+> **Why RabbitMQ fits this use case:** We needed reliable **task distribution** with rich routing (`order.placed` vs `order.cancelled`), low latency, and dead-lettering for poison messages. We did **not** need weeks of message retention or replay for analytics — once ACK'd, the work is done. RabbitMQ's exchange/queue model maps cleanly to "do this work once."
+>
+> **Consistency model:** This is eventual consistency. Inventory might reserve 200ms after the order is saved. The UI shows "Processing" until we receive `InventoryReserved` and `PaymentCharged` events back (or a Temporal orchestrator drives the saga). Every consumer is **idempotent** because RabbitMQ provides at-least-once delivery — a crash before ACK redelivers the message.
+>
+> **Outbox pattern:** To avoid dual-write bugs (DB commit succeeds, publish fails), we write the order and an outbox row in one MongoDB transaction. A poller publishes to RabbitMQ and marks the outbox processed. That way we never lose an `OrderPlaced` event.
+>
+> **Outcome:** Checkout API p95 dropped because it no longer waited on payment + email. Email spikes no longer starved inventory workers. Failed payments went to a DLQ with PagerDuty alerts instead of blocking the HTTP request.
+
+---
+
+### Example 2: Product Catalog Streaming with Kafka
+
+**Business scenario:** Product catalog changes must update OpenSearch (search), a recommendation engine, a cache warmer, and a data warehouse — independently, at high volume, with the ability to **replay** yesterday's events if a consumer bug is found.
+
+#### Topology
+
+```
+Catalog Service / Debezium CDC
+    │ produces to topic products.events
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│  Kafka Cluster                                            │
+│  Topic: products.events                                   │
+│    Partition 0 │ Partition 1 │ Partition 2 │ Partition 3  │
+│    (key=productId → same product always same partition)   │
+│    Retention: 7 days                                      │
+└──────────────────────────────────────────────────────────┘
+    │                 │                  │               │
+    ▼                 ▼                  ▼               ▼
+ Consumer Group    Consumer Group     Consumer Group   Consumer Group
+ "search-indexer"  "recommendations"  "cache-warmer"   "warehouse-etl"
+ (OpenSearch)      (ML features)      (Redis)          (S3/Redshift)
+```
+
+#### Why Kafka here?
+
+- **Multiple independent consumers** each need the full stream — Kafka lets each consumer group track its own offset
+- **Replay** — if search indexer had a bug, reset offset to yesterday and reprocess
+- **High throughput** — 50K product updates/hour during catalog imports; partitions scale horizontally
+- **Ordering per product** — partition key `productId` guarantees updates for one product are ordered
+- **Retention** — keep 7 days of log for late-joining consumers and recovery
+- CDC via Debezium can stream MongoDB/Postgres changes into Kafka as the source of truth log
+
+#### Event Payload (Avro-friendly JSON shown)
+
+```json
+{
+  "eventId": "evt_9b21",
+  "eventType": "ProductUpdated",
+  "eventVersion": 2,
+  "occurredAt": "2024-06-15T11:00:00Z",
+  "productId": "p456",
+  "data": {
+    "name": "Wireless Keyboard",
+    "category": "electronics",
+    "price": 79.99,
+    "inStock": true,
+    "updatedAt": "2024-06-15T11:00:00Z"
+  }
+}
+```
+
+#### Java Producer (Spring Kafka)
+
+```java
+@Service
+public class ProductEventPublisher {
+  private final KafkaTemplate<String, String> kafkaTemplate;
+  private final ObjectMapper objectMapper;
+
+  public ProductEventPublisher(KafkaTemplate<String, String> kafkaTemplate,
+                               ObjectMapper objectMapper) {
+    this.kafkaTemplate = kafkaTemplate;
+    this.objectMapper = objectMapper;
+  }
+
+  public void publishProductUpdated(Product product) throws Exception {
+    ProductUpdatedEvent event = new ProductUpdatedEvent(
+        UUID.randomUUID().toString(),
+        "ProductUpdated",
+        2,
+        Instant.now().toString(),
+        product.getId(),
+        new ProductData(product.getName(), product.getCategory(),
+            product.getPrice(), product.isInStock(), product.getUpdatedAt())
+    );
+
+    ProducerRecord<String, String> record = new ProducerRecord<>(
+        "products.events",
+        product.getId(),                          // CRITICAL: same product → same partition → ordered
+        objectMapper.writeValueAsString(event)
+    );
+    record.headers().add("correlation-id",
+        product.getCorrelationId().getBytes(StandardCharsets.UTF_8));
+
+    kafkaTemplate.send(record);
+  }
+}
+
+// application.yml (idempotent producer)
+// spring.kafka.producer.acks=all
+// spring.kafka.producer.properties.enable.idempotence=true
+// spring.kafka.producer.properties.max.in.flight.requests.per.connection=5
+// spring.kafka.producer.retries=5
+```
+
+#### Java Consumer — Search Indexer
+
+```java
+@Service
+public class SearchIndexerListener {
+  private final OpenSearchClient openSearchClient;
+  private final ObjectMapper objectMapper;
+
+  public SearchIndexerListener(OpenSearchClient openSearchClient, ObjectMapper objectMapper) {
+    this.openSearchClient = openSearchClient;
+    this.objectMapper = objectMapper;
+  }
+
+  @KafkaListener(topics = "products.events", groupId = "search-indexer")
+  public void onProductEvent(ConsumerRecord<String, String> record) throws Exception {
+    ProductEvent event = objectMapper.readValue(record.value(), ProductEvent.class);
+
+    // Idempotent upsert by productId
+    switch (event.eventType()) {
+      case "ProductCreated", "ProductUpdated" -> openSearchClient.index(i -> i
+          .index("products")
+          .id(event.productId())
+          .document(event.data()));
+      case "ProductDeleted" -> openSearchClient.delete(d -> d
+          .index("products")
+          .id(event.productId()));
+      default -> { /* ignore unknown types for forward compatibility */ }
+    }
+    // Offset commits automatically (enable.auto.commit / Spring ack mode)
+    // Use AckMode.MANUAL + Acknowledgment for stricter control
+  }
+}
+
+// application.yml
+// spring.kafka.consumer.group-id=search-indexer
+// spring.kafka.consumer.auto-offset-reset=latest
+// spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+// spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+// spring.kafka.listener.ack-mode=batch
+```
+
+#### Kafka Partitioning & Ordering Mental Model
+
+```
+productId "p456" → hash → Partition 2
+productId "p789" → hash → Partition 0
+
+Within Partition 2: p456 update#1 → update#2 → update#3  (strict order)
+Across partitions: NO global order guarantee
+
+Rule: Put the entity ID in the message key whenever you need per-entity ordering.
+```
+
+#### Failure Handling with Kafka
+
+| Failure | Behavior |
+|---------|----------|
+| Consumer crash | Another member of the group takes partitions (rebalance); resumes from last committed offset |
+| Processing bug shipped | Fix code → reset consumer group offset → **replay** last N hours |
+| Poison message | Skip + write to DLQ topic `products.events.dlq`; don't block the partition |
+| Slow consumer | Lag metric rises (`records-lag`); scale consumers up to #partitions |
+| Duplicate on retry | Idempotent upsert by `productId`; store `eventId` for dedup if needed |
+
+#### Q: Explain event-driven architecture using Kafka with a real example.
+
+> **Detailed Answer:** With Kafka, event-driven architecture looks more like a **durable commit log** than a task queue. In our catalog platform, every product create/update/delete was published to the `products.events` topic. The message key was `productId` so all updates for one product landed on the same partition and stayed ordered.
+>
+> Four independent consumer groups read the same topic: **search-indexer** wrote to OpenSearch, **recommendations** updated ML feature stores, **cache-warmer** refreshed Redis, and **warehouse-etl** wrote Parquet to S3 for Airflow. Kafka's key property here is that **each group has its own offset** — the search indexer can be at offset 10M while warehouse is at 9.8M, and neither blocks the other. RabbitMQ would require a separate queue copy per consumer type and would delete messages after ACK, making replay painful.
+>
+> **Why Kafka over RabbitMQ for this case:** We needed (1) multiple fan-out consumers on the same stream, (2) 7-day retention for replay after bugs, (3) high throughput during nightly catalog imports, and (4) CDC from MongoDB via Debezium as an alternative producer. Those are streaming/log use cases, not classic work queues.
+>
+> **Real incident:** A search indexer mapping bug corrupted brand filters for 6 hours. We fixed the mapping, reset the `search-indexer` consumer group offset to `earliest` for that day, and reprocessed ~2M events in 40 minutes. OpenSearch recovered without touching Catalog Service. That replay capability is why we chose Kafka.
+>
+> **Trade-offs we accepted:** Higher operational complexity (partitions, rebalances, consumer lag monitoring), eventual consistency (search lag of 1–3 seconds under load), and the need for idempotent consumers because Kafka is at-least-once by default (exactly-once requires transactional APIs and careful design).
+>
+> **Interview contrast:** For "do this job once" (send email, charge payment), I still prefer RabbitMQ or SQS. For "many systems must react to a stream of facts and sometimes re-read history," I choose Kafka.
+
+---
+
+### Side-by-Side Flow: Same Business Event, Two Brokers
+
+| Step | RabbitMQ (OrderPlaced) | Kafka (ProductUpdated) |
+|------|------------------------|------------------------|
+| 1. Produce | Publish to exchange with routing key | Produce to topic with key=`productId` |
+| 2. Store | Message sits in bound queues | Append to partition log |
+| 3. Consume | Competing consumers on each queue | Each consumer group reads independently |
+| 4. Success | ACK → message deleted | Commit offset → message still retained |
+| 5. New consumer added | Create queue + bind to exchange; only gets **new** messages | New consumer group can read from beginning (replay) |
+| 6. Bug fix | Reprocess from DLQ / DB source | Reset offset and replay topic |
+
+### Common EDA Patterns
+
+| Pattern | Description | Typical Broker |
+|---------|-------------|----------------|
+| **Pub/Sub fan-out** | One event, many subscribers | RabbitMQ fanout/topic; Kafka multiple groups |
+| **Work queue** | Compete for tasks, process once | RabbitMQ queue; Kafka single consumer group |
+| **Event sourcing** | Store state as sequence of events | Kafka (log as source of truth) |
+| **CQRS + events** | Writes emit events → rebuild read models | Kafka + OpenSearch/Redis |
+| **CDC streaming** | DB changes → events | Debezium → Kafka |
+| **Saga choreography** | Services react to each other's domain events | Either; Temporal often preferred for complex sagas |
+| **Transactional outbox** | Write DB + outbox atomically; poller publishes | Works with both |
+
+### Decision Framework (Say This in Interviews)
+
+```
+Need task distribution + complex routing + low latency?
+  → RabbitMQ (or SQS + SNS on AWS)
+
+Need event stream + multiple independent consumers + replay?
+  → Kafka (or Kinesis / MSK on AWS)
+
+Need simple managed queue, AWS-native?
+  → SQS (point-to-point) + SNS (fan-out)
+
+Need long-running business workflow with compensations?
+  → Temporal (orchestration) — events alone get messy
+```
+
+### Pitfalls to Mention Proactively
+
+1. **Dual write without outbox** — DB commit succeeds, publish fails → lost events
+2. **Non-idempotent consumers** — duplicates cause double charges / double emails
+3. **Chatty thin events without correlation IDs** — impossible to debug across services
+4. **Unbounded queues / lag** — no alerts on queue depth or Kafka consumer lag
+5. **Using Kafka as a database** without a real system of record for business entities
+6. **Global ordering assumptions** — Kafka only orders per partition; RabbitMQ per queue
+
+---
+
+## 6. Workflow Orchestration (Airflow vs Temporal)
 
 ### Comparison
 
@@ -507,7 +1012,7 @@ with DAG('daily_sales_etl', start_date=datetime(2024, 1, 1), schedule='0 2 * * *
 
 ---
 
-## 6. MongoDB
+## 7. MongoDB
 
 ### When to Use
 
@@ -651,7 +1156,7 @@ Shard key: status (bad — low cardinality, only 3-5 values)
 
 ---
 
-## 7. ElasticSearch / OpenSearch
+## 8. ElasticSearch / OpenSearch
 
 ### Role
 
@@ -765,7 +1270,7 @@ async function indexProduct(product) {
 
 ---
 
-## 8. Redis (Distributed Cache)
+## 9. Redis (Distributed Cache)
 
 ### Patterns
 
@@ -917,7 +1422,7 @@ async function getProductSafe(id) {
 
 ---
 
-## 9. Algorithms & Data Structures
+## 10. Algorithms & Data Structures
 
 ### Architect-Level Choices
 
@@ -986,7 +1491,7 @@ O(2^n)     — recursive subsets (exponential — avoid at scale)
 
 ---
 
-## 10. Node.js
+## 11. Node.js
 
 ### Event Loop (detailed)
 
@@ -1106,7 +1611,7 @@ function runHeavyTask(data) {
 
 ---
 
-## 11. Java
+## 12. Java
 
 ### Spring Boot Microservice Sketch
 
@@ -1202,7 +1707,7 @@ public class OrderController {
 
 ---
 
-## 12. Design Patterns & SOLID
+## 13. Design Patterns & SOLID
 
 ### SOLID with Examples
 
@@ -1349,7 +1854,7 @@ class CircuitBreaker {
 
 ---
 
-## 13. Testing, TDD & Agile
+## 14. Testing, TDD & Agile
 
 ### Testing Pyramid
 
@@ -1450,7 +1955,7 @@ describe('Order API contract', () => {
 
 ---
 
-## 14. Observability (Datadog)
+## 15. Observability (Datadog)
 
 ### Three Pillars
 
@@ -1548,7 +2053,7 @@ Error budget: 0.1% ≈ 43 min downtime/month
 
 ---
 
-## 15. DevOps: Docker, Kubernetes, Jenkins
+## 16. DevOps: Docker, Kubernetes, Jenkins
 
 ### Multi-Stage Dockerfile (Node.js)
 
@@ -1727,7 +2232,7 @@ pipeline {
 
 ---
 
-## 16. System Design Walkthroughs
+## 17. System Design Walkthroughs
 
 ### Design A: E-Commerce Order Platform
 
@@ -1847,7 +2352,7 @@ Dashboards → Datadog / QuickSight
 
 ---
 
-## 17. Behavioral & Communication
+## 18. Behavioral & Communication
 
 ### STAR Story Templates
 
@@ -1900,7 +2405,7 @@ Dashboards → Datadog / QuickSight
 
 ---
 
-## 18. Quick Reference Cheat Sheet
+## 19. Quick Reference Cheat Sheet
 
 ```
 ARCHITECTURE
@@ -1912,6 +2417,14 @@ DISTRIBUTED SYSTEMS
   At-least-once + idempotency > exactly-once fantasy
   Timeouts + retries + circuit breakers on every outbound call
   Shard by high-cardinality key (userId, tenantId)
+
+EVENT-DRIVEN ARCHITECTURE
+  Events = facts that happened; commands = requests to do work
+  RabbitMQ → smart broker, queues, complex routing, ACK deletes message
+  Kafka → durable log, partitions, replay, multiple independent consumer groups
+  Use outbox pattern; make every consumer idempotent
+  Task queue / work distribution → RabbitMQ or SQS
+  Event stream / CDC / replay / many consumers → Kafka
 
 DATA
   MongoDB  → flexible documents, index-aware queries
@@ -1945,17 +2458,18 @@ DEVOPS
 1. Recite architect answer framework (Context → Options → Trade-offs → Decision → Outcome)
 2. Draw e-commerce design from memory (API GW → services → Mongo/Redis/ES)
 3. State Airflow vs Temporal in one sentence each, plus when to use which
-4. Explain cache-aside + stampede protection with failure mode
-5. Walk through prod debug: metrics → traces → logs → deploy → mitigate
-6. Tell your best architectural decision story (60 seconds, then 2-minute version)
-7. Explain saga pattern: choreography vs orchestration with compensation example
-8. Describe expand-migrate-contract for zero-downtime DB migrations
-9. Answer "How do you define service boundaries?" using DDD bounded contexts
-10. State your Node.js vs Java decision criteria for a new microservice
+4. Explain event-driven architecture: RabbitMQ order fan-out vs Kafka product stream + replay
+5. Explain cache-aside + stampede protection with failure mode
+6. Walk through prod debug: metrics → traces → logs → deploy → mitigate
+7. Tell your best architectural decision story (60 seconds, then 2-minute version)
+8. Explain saga pattern: choreography vs orchestration with compensation example
+9. Describe expand-migrate-contract for zero-downtime DB migrations
+10. Answer "How do you define service boundaries?" using DDD bounded contexts
+11. State your Node.js vs Java decision criteria for a new microservice
 
 ---
 
-## Appendix: Top 30 Interview Questions Checklist
+## Appendix: Top Interview Questions Checklist
 
 Use this to verify you can answer each question in 90–120 seconds with the COTDO framework.
 
@@ -1969,28 +2483,31 @@ Use this to verify you can answer each question in 90–120 seconds with the COT
 | 6 | Walk me through designing a service on AWS | §3 |
 | 7 | How do you ensure exactly-once processing? | §4 |
 | 8 | Explain consistent hashing | §4 |
-| 9 | When would you choose Temporal over Airflow? | §5 |
-| 10 | How does Temporal guarantee durability? | §5 |
-| 11 | How do you design a MongoDB schema for high traffic? | §6 |
-| 12 | How do you handle MongoDB transactions? | §6 |
-| 13 | How do you keep OpenSearch in sync with the primary DB? | §7 |
-| 14 | Explain full-text search in ElasticSearch | §7 |
-| 15 | Compare cache-aside, write-through, write-behind | §8 |
-| 16 | Design a distributed rate limiter with Redis | §8 |
-| 17 | When do algorithms matter at the architect level? | §9 |
-| 18 | Explain the Node.js event loop | §10 |
-| 19 | How do you handle errors in production Node.js? | §10 |
-| 20 | When do you choose Java over Node.js? | §11 |
-| 21 | Explain SOLID with a refactoring example | §12 |
-| 22 | What is the Circuit Breaker pattern? | §12 |
-| 23 | How do you implement TDD at the system level? | §13 |
-| 24 | How do you balance tech debt with feature delivery? | §13 |
-| 25 | Walk through debugging a production latency spike | §14 |
-| 26 | How do you define and measure SLOs? | §14 |
-| 27 | Explain expand-migrate-contract for DB migrations | §15 |
-| 28 | Design an e-commerce order platform | §16 |
-| 29 | Design a real-time analytics dashboard | §16 |
-| 30 | Tell me about a time you influenced without authority | §17 |
+| 9 | Explain event-driven architecture with a RabbitMQ example | §5 |
+| 10 | Explain event-driven architecture with a Kafka example | §5 |
+| 11 | When do you choose RabbitMQ vs Kafka? | §5 |
+| 12 | When would you choose Temporal over Airflow? | §6 |
+| 13 | How does Temporal guarantee durability? | §6 |
+| 14 | How do you design a MongoDB schema for high traffic? | §7 |
+| 15 | How do you handle MongoDB transactions? | §7 |
+| 16 | How do you keep OpenSearch in sync with the primary DB? | §8 |
+| 17 | Explain full-text search in ElasticSearch | §8 |
+| 18 | Compare cache-aside, write-through, write-behind | §9 |
+| 19 | Design a distributed rate limiter with Redis | §9 |
+| 20 | When do algorithms matter at the architect level? | §10 |
+| 21 | Explain the Node.js event loop | §11 |
+| 22 | How do you handle errors in production Node.js? | §11 |
+| 23 | When do you choose Java over Node.js? | §12 |
+| 24 | Explain SOLID with a refactoring example | §13 |
+| 25 | What is the Circuit Breaker pattern? | §13 |
+| 26 | How do you implement TDD at the system level? | §14 |
+| 27 | How do you balance tech debt with feature delivery? | §14 |
+| 28 | Walk through debugging a production latency spike | §15 |
+| 29 | How do you define and measure SLOs? | §15 |
+| 30 | Explain expand-migrate-contract for DB migrations | §16 |
+| 31 | Design an e-commerce order platform | §17 |
+| 32 | Design a real-time analytics dashboard | §17 |
+| 33 | Tell me about a time you influenced without authority | §18 |
 
 ---
 
