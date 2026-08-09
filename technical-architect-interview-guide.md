@@ -2350,6 +2350,256 @@ Dashboards → Datadog / QuickSight
 >
 > **Why not just real-time everything?** At 10GB/day, batch processing costs ~$50/month (S3 + Athena + Airflow on MWAA). Full real-time with Kafka + Flink + ClickHouse would cost ~$2,000/month. The product team's 5-minute latency need is met by the lightweight Flink path without over-engineering the entire pipeline.
 
+### Design C: Ticket Booking Application (Movies / Events / Flights)
+
+```
+Client → CDN → API Gateway → Booking BFF
+                                │
+                ┌───────────────┼────────────────┐
+                ▼               ▼                ▼
+         Event Catalog    Seat Inventory     Booking Service
+         (read-heavy)     (hot path, CP)     (saga owner)
+                │               │                │
+            Postgres/       Redis + DB        Postgres
+            Redis cache     seat locks        bookings
+                                │
+                    Payment Service → Stripe
+                                │
+              Kafka: booking.events → Notify / Search / Analytics
+```
+
+**Core hard problems:** no double-booking, flash-sale spikes, soft hold expiry, payment failures, fairness.
+
+#### Clarify Requirements First
+
+| Question | Assumed Answer |
+|----------|----------------|
+| Domain? | Concert / movie tickets (seat map) |
+| Scale? | 100K users browsing; 10K concurrent trying same show; 50K bookings/day |
+| Peak? | On-sale drop: 100K req/min for 5 minutes |
+| Consistency? | **Never sell the same seat twice** (strong consistency on seat assign) |
+| Hold time? | Soft lock 10 minutes while user pays |
+| Regions? | Single region first; multi-region later |
+| Latency? | Seat select < 300ms; confirm booking < 2s p95 |
+
+#### High-Level Flow
+
+```
+1. Browse events / shows          (cacheable, AP OK)
+2. Open seat map for a show       (near-real-time availability)
+3. Select seats → soft lock       (strong, time-bounded reservation)
+4. Pay within TTL                 (idempotent payment)
+5. Confirm booking + issue ticket (QR / PDF)
+6. On timeout / pay fail → release seats
+```
+
+#### Services & Data Ownership
+
+| Service | Responsibility | Store | Consistency |
+|---------|----------------|-------|-------------|
+| **Catalog** | Events, venues, showtimes | Postgres + Redis cache | Eventual OK |
+| **Inventory / Seat** | Seat map, availability, locks | Redis (locks) + Postgres (source of truth) | **Strong on assign** |
+| **Booking** | Create booking, orchestrate saga | Postgres | Strong per booking |
+| **Payment** | Charge / refund | Postgres + Stripe | Idempotent |
+| **Ticketing** | Generate QR/PDF, validate entry | S3 + Postgres | After confirm only |
+| **Notification** | Email/SMS tickets | Queue consumer | At-least-once |
+| **Waitlist** (optional) | Notify when seats free | Redis + queue | Best-effort |
+
+#### Seat Locking — The Heart of the Design
+
+```
+Seat states: AVAILABLE → LOCKED (TTL 10m) → BOOKED
+                    ↑______________|
+                    (TTL expire or payment fail)
+```
+
+**Java-style lock with Redis (SET NX EX):**
+
+```java
+public boolean lockSeat(String showId, String seatId, String bookingId, int ttlSeconds) {
+  String key = "seat:" + showId + ":" + seatId;
+  // SET key bookingId NX EX 600  — atomic lock
+  Boolean ok = redis.setIfAbsent(key, bookingId, Duration.ofSeconds(ttlSeconds));
+  return Boolean.TRUE.equals(ok);
+}
+
+public void releaseSeat(String showId, String seatId, String bookingId) {
+  String key = "seat:" + showId + ":" + seatId;
+  // Lua: release only if we own the lock (avoid releasing someone else's seat)
+  String script = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+      return redis.call('del', KEYS[1])
+    else
+      return 0
+    end
+    """;
+  redis.execute(script, List.of(key), bookingId);
+}
+```
+
+**Confirm booking (DB as source of truth):**
+
+```sql
+-- Only confirm if still available / locked by this booking
+UPDATE seats
+SET status = 'BOOKED', booking_id = :bookingId, version = version + 1
+WHERE show_id = :showId AND seat_id = :seatId
+  AND status IN ('AVAILABLE', 'LOCKED')
+  AND (lock_owner = :bookingId OR lock_owner IS NULL)
+  AND version = :expectedVersion;  -- optimistic concurrency
+```
+
+#### Booking Saga (Orchestrated)
+
+```
+Booking Service (orchestrator / Temporal)
+  1. Create booking PENDING
+  2. Lock seats in Redis + mark LOCKED in DB
+  3. Charge payment (idempotency key = bookingId)
+  4. Mark seats BOOKED, booking CONFIRMED
+  5. Publish BookingConfirmed → ticketing + email
+On failure / TTL:
+  - Refund if charged
+  - Release Redis locks
+  - Mark seats AVAILABLE
+  - booking CANCELLED / EXPIRED
+```
+
+#### Full Spoken Answer
+
+> **Context:** Design a ticket booking system for concerts. Hard requirement: never double-book a seat. Peak is an on-sale drop — 100K requests/min for a few minutes. Users get a 10-minute hold while paying.
+>
+> **High-level:** Separate **browse** (AP, cacheable) from **seat assignment** (CP, strongly consistent). Catalog is read-heavy behind CDN + Redis. Inventory owns seats. Booking owns the saga. Payment is isolated. Kafka fans out confirmations to ticketing, email, and analytics.
+>
+> **Seat assignment options I considered:**
+> 1. **DB row lock (`SELECT FOR UPDATE`)** — simple, correct, but DB becomes bottleneck at flash-sale scale.
+> 2. **Redis distributed lock (`SET NX EX`) + DB confirm** — fast lock path; DB remains source of truth at payment time.
+> 3. **Queue per show** — serialize all booking attempts for a hot show; very fair, but higher latency and more ops.
+>
+> **Decision:** Redis soft lock with TTL for the hold, then optimistic/conditional update in Postgres at confirm. For extreme hot shows, add a **per-show booking queue** (Kafka partition key = `showId` or a dedicated work queue) so assignment is serialized without melting the DB.
+>
+> **Distributed systems properties:**
+> - **CAP:** Seat assign is **CP** during contention — better to reject/retry than oversell. Catalog/browse is **AP** — slight staleness on "X seats left" is OK.
+> - **Idempotency:** Payment and confirm APIs keyed by `bookingId`. Retries safe.
+> - **Exactly-once effect:** At-least-once events + unique constraints on `(show_id, seat_id)` where `status='BOOKED'`.
+> - **Ordering:** Per-show ordering via Kafka key `showId` for inventory events.
+> - **Failure modes:** Payment timeout → saga compensation releases seats. Redis flush → rebuild locks from DB `LOCKED` rows + TTL job. Clock skew → store absolute expiry timestamps, don't trust client clocks.
+>
+> **Scaling the flash sale:**
+> - Wait-room / virtual queue at edge (CloudFront + token bucket) before app tier
+> - Cache seat maps; only lock API hits Redis/DB
+> - Shard inventory by `showId` (hot show = hot shard — mitigate with queue or finer shard by section)
+> - Rate limit per user; captcha on-sale
+>
+> **Outcome metrics:** zero double-books (DB unique constraint as final guard), p95 lock < 50ms, confirm < 2s, hold expiry job recovers seats within seconds of TTL.
+
+#### Trade-offs Table (Say These Out Loud)
+
+| Decision | Option A | Option B | Choose When |
+|----------|----------|----------|-------------|
+| Seat lock store | Postgres row locks | Redis `SET NX` + DB confirm | Redis for flash sales; DB-only for low QPS |
+| Consistency of "seats left" | Strong (read primary) | Eventual (cache) | Strong on lock/confirm; eventual on browse count |
+| Hold mechanism | Soft lock TTL | Hard book then cancel | Soft lock — better UX, need expiry workers |
+| Oversell prevention | Pessimistic lock | Optimistic version + unique constraint | Both: lock for UX, constraint for safety |
+| Hot show fairness | Free-for-all | Virtual waiting room / queue | Queue when demand >> supply |
+| Saga style | Choreography (events) | Orchestration (Temporal) | Orchestration — payment + expiry + refunds are complex |
+| Messaging | RabbitMQ work queues | Kafka event log | Kafka if many consumers + audit/replay; Rabbit/SQS for email jobs |
+| Ticket delivery | Sync in request | Async after confirm | Async — don't block confirm on PDF/email |
+| Multi-region | Active-active bookings | Active-passive | Passive first — active-active seat inventory is very hard |
+| Sold-out UX | Fail requests | Waitlist | Waitlist improves conversion; adds fairness/abuse complexity |
+
+#### Distributed Systems Deep Dive
+
+**1. Double-booking race**
+```
+User A and User B both click Seat 12A at the same ms.
+Without atomic lock → both think they got it → payment → conflict.
+Fix: atomic Redis SET NX, or DB unique(show_id, seat_id) on BOOKED, or single-threaded assigner per show.
+```
+
+**2. Lock expiry vs payment in flight**
+```
+t=0   lock seat (TTL 10m)
+t=9m  user pays (Stripe slow)
+t=10m lock expires, seat freed, User C locks it
+t=10.5m User A payment succeeds → conflict
+Fix: extend lock TTL when payment starts; confirm is conditional on lock_owner=bookingId;
+     if confirm fails after charge → auto-refund.
+```
+
+**3. Hot partition / hot key**
+```
+One Taylor Swift show → all traffic hits seat:{showId}:*
+Redis single key hotspot if you store whole map in one key.
+Fix: one Redis key per seat (or per section), shard by showId+section;
+     optional local queue per show.
+```
+
+**4. Cache invalidation on seat map**
+```
+Browse cache shows seat free; lock API says taken.
+Acceptable — treat seat map as hint; lock response is truth.
+Invalidate section cache on every lock/book/release (or short TTL 1–2s during on-sale).
+```
+
+**5. Exactly-once ticket email**
+```
+Kafka at-least-once → duplicate BookingConfirmed.
+Notification consumer dedupes on bookingId unique send ledger.
+```
+
+**6. Split brain / Redis down**
+```
+If Redis unavailable: fail closed on lock API (don't book without lock),
+or fall back to DB locks with aggressive rate limits.
+Never "best effort" assign seats without a coordination mechanism.
+```
+
+#### Minimal API Surface
+
+```
+GET  /events/{id}/shows
+GET  /shows/{showId}/seats          # seat map + status (cached)
+POST /bookings                      # create PENDING + lock seats {showId, seatIds[]}
+POST /bookings/{id}/pay             # start payment (idempotent)
+GET  /bookings/{id}                 # status: PENDING|CONFIRMED|EXPIRED|CANCELLED
+POST /bookings/{id}/cancel
+```
+
+#### Java Confirm Snippet (Final Guard)
+
+```java
+@Transactional
+public Booking confirm(String bookingId) {
+  Booking booking = bookingRepo.findByIdForUpdate(bookingId)
+      .orElseThrow();
+  if (booking.getStatus() == Status.CONFIRMED) return booking; // idempotent
+
+  int updated = seatRepo.bookSeats(booking.getShowId(), booking.getSeatIds(), bookingId);
+  if (updated != booking.getSeatIds().size()) {
+    paymentService.refund(bookingId);          // compensation
+    booking.markFailed("SEAT_CONFLICT");
+    return bookingRepo.save(booking);
+  }
+
+  booking.markConfirmed();
+  bookingRepo.save(booking);
+  eventPublisher.publish(new BookingConfirmed(bookingId));
+  return booking;
+}
+```
+
+#### What Interviewers Probe Next
+
+| Follow-up | Strong Answer |
+|-----------|---------------|
+| How do you prevent overselling? | Atomic lock + conditional DB update + unique constraint |
+| What if payment succeeds but confirm crashes? | Idempotent confirm; reconcile job; refund if seats lost |
+| How do you handle 1M users at on-sale? | Wait room, cache reads, lock-only writes, per-show queue |
+| SQL vs NoSQL for seats? | Relational shines for constraints/transactions; Redis for speed |
+| Group booking (4 seats together)? | Lock all seats in one Lua/transaction; all-or-nothing |
+| Arena vs airplane (contiguous seats)? | Same model; add adjacency rules in lock validation |
+
 ---
 
 ## 18. Behavioral & Communication
