@@ -542,78 +542,120 @@ Inventory Service   Payment Service    Email Service
 }
 ```
 
-#### Node.js Producer (amqplib)
+#### Java Producer (Spring AMQP)
 
-```javascript
-const amqp = require('amqplib');
+```java
+@Service
+public class OrderEventPublisher {
+  private final RabbitTemplate rabbitTemplate;
+  private final ObjectMapper objectMapper;
 
-async function publishOrderPlaced(order) {
-  const conn = await amqp.connect(process.env.RABBITMQ_URL);
-  const ch = await conn.createChannel();
+  public OrderEventPublisher(RabbitTemplate rabbitTemplate, ObjectMapper objectMapper) {
+    this.rabbitTemplate = rabbitTemplate;
+    this.objectMapper = objectMapper;
+  }
 
-  await ch.assertExchange('orders.events', 'topic', { durable: true });
+  public void publishOrderPlaced(Order order) {
+    OrderPlacedEvent event = new OrderPlacedEvent(
+        UUID.randomUUID().toString(),
+        "OrderPlaced",
+        Instant.now().toString(),
+        order.getCorrelationId(),
+        new OrderPlacedData(order.getId(), order.getUserId(),
+            order.getItems(), order.getTotal(), order.getCurrency())
+    );
 
-  const event = {
-    eventId: crypto.randomUUID(),
-    eventType: 'OrderPlaced',
-    occurredAt: new Date().toISOString(),
-    correlationId: order.correlationId,
-    data: {
-      orderId: order.id,
-      userId: order.userId,
-      items: order.items,
-      total: order.total,
-      currency: order.currency
-    }
-  };
+    rabbitTemplate.convertAndSend(
+        "orders.events",          // exchange
+        "order.placed",           // routing key
+        event,
+        message -> {
+          message.getMessageProperties().setContentType("application/json");
+          message.getMessageProperties().setMessageId(event.eventId());
+          message.getMessageProperties().setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+          return message;
+        }
+    );
+  }
+}
 
-  ch.publish(
-    'orders.events',
-    'order.placed',                          // routing key
-    Buffer.from(JSON.stringify(event)),
-    { persistent: true, contentType: 'application/json', messageId: event.eventId }
-  );
+// RabbitMQ topology (exchange, queues, DLX, bindings)
+@Configuration
+public class RabbitConfig {
+  @Bean
+  TopicExchange ordersEventsExchange() {
+    return new TopicExchange("orders.events", true, false);
+  }
 
-  await ch.close();
-  await conn.close();
+  @Bean
+  FanoutExchange ordersDlx() {
+    return new FanoutExchange("orders.dlx", true, false);
+  }
+
+  @Bean
+  Queue inventoryReserveQueue() {
+    return QueueBuilder.durable("inventory.reserve")
+        .deadLetterExchange("orders.dlx")
+        .ttl(60_000)
+        .build();
+  }
+
+  @Bean
+  Binding inventoryBinding(Queue inventoryReserveQueue, TopicExchange ordersEventsExchange) {
+    return BindingBuilder.bind(inventoryReserveQueue)
+        .to(ordersEventsExchange)
+        .with("order.placed");
+  }
+
+  @Bean
+  Queue ordersDeadQueue() {
+    return QueueBuilder.durable("orders.dead").build();
+  }
+
+  @Bean
+  Binding deadLetterBinding(Queue ordersDeadQueue, FanoutExchange ordersDlx) {
+    return BindingBuilder.bind(ordersDeadQueue).to(ordersDlx);
+  }
 }
 ```
 
-#### Node.js Consumer — Inventory (with ACK, retry, DLQ)
+#### Java Consumer — Inventory (with ACK, retry, DLQ)
 
-```javascript
-async function startInventoryConsumer() {
-  const conn = await amqp.connect(process.env.RABBITMQ_URL);
-  const ch = await conn.createChannel();
+```java
+@Service
+public class InventoryReserveListener {
+  private final InventoryService inventoryService;
+  private final ObjectMapper objectMapper;
 
-  await ch.assertExchange('orders.events', 'topic', { durable: true });
-  await ch.assertExchange('orders.dlx', 'fanout', { durable: true });
+  public InventoryReserveListener(InventoryService inventoryService, ObjectMapper objectMapper) {
+    this.inventoryService = inventoryService;
+    this.objectMapper = objectMapper;
+  }
 
-  await ch.assertQueue('inventory.reserve', {
-    durable: true,
-    arguments: {
-      'x-dead-letter-exchange': 'orders.dlx',
-      'x-message-ttl': 60000          // optional: expire stuck messages
-    }
-  });
-  await ch.bindQueue('inventory.reserve', 'orders.events', 'order.placed');
-  await ch.assertQueue('orders.dead', { durable: true });
-  await ch.bindQueue('orders.dead', 'orders.dlx', '');
-
-  ch.prefetch(10); // fair dispatch — don't overwhelm one worker
-
-  ch.consume('inventory.reserve', async (msg) => {
-    if (!msg) return;
+  @RabbitListener(queues = "inventory.reserve", ackMode = "MANUAL")
+  public void onOrderPlaced(Message message, Channel channel) throws Exception {
+    long tag = message.getMessageProperties().getDeliveryTag();
     try {
-      const event = JSON.parse(msg.content.toString());
-      await reserveStock(event.data);          // idempotent by orderId
-      ch.ack(msg);                             // remove from queue
-    } catch (err) {
-      // nack without requeue → goes to DLX after broker rules / max retries
-      console.error('inventory failed', err);
-      ch.nack(msg, false, false);
+      OrderPlacedEvent event = objectMapper.readValue(message.getBody(), OrderPlacedEvent.class);
+      inventoryService.reserveStock(event.data()); // idempotent by orderId
+      channel.basicAck(tag, false);                // remove from queue
+    } catch (Exception ex) {
+      // nack without requeue → dead-letter exchange
+      channel.basicNack(tag, false, false);
+      throw ex;
     }
-  });
+  }
+}
+
+// Fair dispatch — don't overwhelm one worker
+@Bean
+public RabbitListenerContainerFactory<?> rabbitListenerContainerFactory(
+    ConnectionFactory connectionFactory) {
+  SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+  factory.setConnectionFactory(connectionFactory);
+  factory.setPrefetchCount(10);
+  factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+  return factory;
 }
 ```
 
@@ -694,79 +736,89 @@ Catalog Service / Debezium CDC
 }
 ```
 
-#### Node.js Producer (kafkajs)
+#### Java Producer (Spring Kafka)
 
-```javascript
-const { Kafka } = require('kafkajs');
+```java
+@Service
+public class ProductEventPublisher {
+  private final KafkaTemplate<String, String> kafkaTemplate;
+  private final ObjectMapper objectMapper;
 
-const kafka = new Kafka({
-  clientId: 'catalog-service',
-  brokers: process.env.KAFKA_BROKERS.split(',')
-});
+  public ProductEventPublisher(KafkaTemplate<String, String> kafkaTemplate,
+                               ObjectMapper objectMapper) {
+    this.kafkaTemplate = kafkaTemplate;
+    this.objectMapper = objectMapper;
+  }
 
-const producer = kafka.producer({
-  idempotent: true,              // broker-side dedup for retries
-  maxInFlightRequests: 5,
-  retry: { retries: 5 }
-});
+  public void publishProductUpdated(Product product) throws Exception {
+    ProductUpdatedEvent event = new ProductUpdatedEvent(
+        UUID.randomUUID().toString(),
+        "ProductUpdated",
+        2,
+        Instant.now().toString(),
+        product.getId(),
+        new ProductData(product.getName(), product.getCategory(),
+            product.getPrice(), product.isInStock(), product.getUpdatedAt())
+    );
 
-async function publishProductUpdated(product) {
-  await producer.connect();
-  await producer.send({
-    topic: 'products.events',
-    messages: [{
-      key: product.id,           // CRITICAL: same product → same partition → ordered
-      value: JSON.stringify({
-        eventId: crypto.randomUUID(),
-        eventType: 'ProductUpdated',
-        eventVersion: 2,
-        occurredAt: new Date().toISOString(),
-        productId: product.id,
-        data: {
-          name: product.name,
-          category: product.category,
-          price: product.price,
-          inStock: product.inStock,
-          updatedAt: product.updatedAt
-        }
-      }),
-      headers: { 'correlation-id': product.correlationId }
-    }]
-  });
+    ProducerRecord<String, String> record = new ProducerRecord<>(
+        "products.events",
+        product.getId(),                          // CRITICAL: same product → same partition → ordered
+        objectMapper.writeValueAsString(event)
+    );
+    record.headers().add("correlation-id",
+        product.getCorrelationId().getBytes(StandardCharsets.UTF_8));
+
+    kafkaTemplate.send(record);
+  }
 }
+
+// application.yml (idempotent producer)
+// spring.kafka.producer.acks=all
+// spring.kafka.producer.properties.enable.idempotence=true
+// spring.kafka.producer.properties.max.in.flight.requests.per.connection=5
+// spring.kafka.producer.retries=5
 ```
 
-#### Node.js Consumer — Search Indexer
+#### Java Consumer — Search Indexer
 
-```javascript
-const consumer = kafka.consumer({
-  groupId: 'search-indexer',     // independent from other groups
-  sessionTimeout: 30000
-});
+```java
+@Service
+public class SearchIndexerListener {
+  private final OpenSearchClient openSearchClient;
+  private final ObjectMapper objectMapper;
 
-async function startSearchIndexer() {
-  await consumer.connect();
-  await consumer.subscribe({ topic: 'products.events', fromBeginning: false });
+  public SearchIndexerListener(OpenSearchClient openSearchClient, ObjectMapper objectMapper) {
+    this.openSearchClient = openSearchClient;
+    this.objectMapper = objectMapper;
+  }
 
-  await consumer.run({
-    eachMessage: async ({ topic, partition, message }) => {
-      const event = JSON.parse(message.value.toString());
+  @KafkaListener(topics = "products.events", groupId = "search-indexer")
+  public void onProductEvent(ConsumerRecord<String, String> record) throws Exception {
+    ProductEvent event = objectMapper.readValue(record.value(), ProductEvent.class);
 
-      // Idempotent upsert by productId
-      if (event.eventType === 'ProductUpdated' || event.eventType === 'ProductCreated') {
-        await esClient.index({
-          index: 'products',
-          id: event.productId,
-          document: event.data
-        });
-      } else if (event.eventType === 'ProductDeleted') {
-        await esClient.delete({ index: 'products', id: event.productId });
-      }
-
-      // Offset commits automatically (or use manual commit for stricter control)
+    // Idempotent upsert by productId
+    switch (event.eventType()) {
+      case "ProductCreated", "ProductUpdated" -> openSearchClient.index(i -> i
+          .index("products")
+          .id(event.productId())
+          .document(event.data()));
+      case "ProductDeleted" -> openSearchClient.delete(d -> d
+          .index("products")
+          .id(event.productId()));
+      default -> { /* ignore unknown types for forward compatibility */ }
     }
-  });
+    // Offset commits automatically (enable.auto.commit / Spring ack mode)
+    // Use AckMode.MANUAL + Acknowledgment for stricter control
+  }
 }
+
+// application.yml
+// spring.kafka.consumer.group-id=search-indexer
+// spring.kafka.consumer.auto-offset-reset=latest
+// spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+// spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+// spring.kafka.listener.ack-mode=batch
 ```
 
 #### Kafka Partitioning & Ordering Mental Model
