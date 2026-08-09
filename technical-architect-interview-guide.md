@@ -2707,15 +2707,16 @@ DEVOPS
 
 1. Recite architect answer framework (Context → Options → Trade-offs → Decision → Outcome)
 2. Draw e-commerce design from memory (API GW → services → Mongo/Redis/ES)
-3. State Airflow vs Temporal in one sentence each, plus when to use which
-4. Explain event-driven architecture: RabbitMQ order fan-out vs Kafka product stream + replay
-5. Explain cache-aside + stampede protection with failure mode
-6. Walk through prod debug: metrics → traces → logs → deploy → mitigate
-7. Tell your best architectural decision story (60 seconds, then 2-minute version)
-8. Explain saga pattern: choreography vs orchestration with compensation example
-9. Describe expand-migrate-contract for zero-downtime DB migrations
-10. Answer "How do you define service boundaries?" using DDD bounded contexts
-11. State your Node.js vs Java decision criteria for a new microservice
+3. Draw ticket booking: seat LOCKED→BOOKED, Redis SET NX, payment saga, no double-book
+4. State Airflow vs Temporal in one sentence each, plus when to use which
+5. Explain event-driven architecture: RabbitMQ order fan-out vs Kafka product stream + replay
+6. Explain cache-aside + stampede protection with failure mode
+7. Walk through prod debug: metrics → traces → logs → deploy → mitigate
+8. Tell your best architectural decision story (60 seconds, then 2-minute version)
+9. Explain saga pattern: choreography vs orchestration with compensation example
+10. Describe expand-migrate-contract for zero-downtime DB migrations
+11. Answer "How do you define service boundaries?" using DDD bounded contexts
+12. State your Node.js vs Java decision criteria for a new microservice
 
 ---
 
@@ -2757,7 +2758,8 @@ Use this to verify you can answer each question in 90–120 seconds with the COT
 | 30 | Explain expand-migrate-contract for DB migrations | §16 |
 | 31 | Design an e-commerce order platform | §17 |
 | 32 | Design a real-time analytics dashboard | §17 |
-| 33 | Tell me about a time you influenced without authority | §18 |
+| 33 | Design a ticket booking system (seats, locks, trade-offs) | §17 |
+| 34 | Tell me about a time you influenced without authority | §18 |
 
 ---
 
