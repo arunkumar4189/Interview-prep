@@ -1489,6 +1489,231 @@ O(2^n)     — recursive subsets (exponential — avoid at scale)
 >
 > **Key principle:** I don't need to implement a B-tree, but I need to know that database indexes are B-trees (O(log n) lookup), so a query without an index is O(n) table scan, and at 50M rows that's the difference between 3ms and 30 seconds.
 
+### Top 10 Data Structure Interview Questions
+
+These are the highest-signal DS questions for a **Technical Architect** interview: expect *what structure*, *why*, *complexity*, and *where it appears in real systems* — not just whiteboard coding.
+
+---
+
+#### 1. Hash Map — How does it work, and when does it degrade?
+
+> **Answer:** A hash map stores key→value pairs in buckets. `hash(key) % capacity` picks a bucket; collisions are handled by chaining (linked list/tree) or open addressing. Average `get/put` is **O(1)**; worst case is **O(n)** if many keys collide into one bucket (bad hash, adversarial keys, or load factor too high).
+>
+> **Resize:** When load factor exceeds a threshold (~0.75), the table doubles and rehashes — amortized O(1), but a spike of latency during resize.
+>
+> **Architect uses:** API session lookup, idempotency key store (in-memory), Redis itself is hash-map based, Kafka consumer local dedup caches, reverse indexes.
+>
+> **Interview tip:** Mention that **string keys** and **poor hash distribution** cause hotspots — same idea as a hot Redis key or hot DB shard.
+>
+> **Java sketch:**
+> ```java
+> Map<String, Booking> bookings = new HashMap<>(); // average O(1)
+> bookings.put(bookingId, booking);
+> Booking b = bookings.get(bookingId);
+> // ConcurrentHashMap for multi-threaded services
+> ```
+
+---
+
+#### 2. Array vs Linked List — When do you choose each?
+
+> **Answer:**
+>
+> | | Array / ArrayList | Linked List |
+> |--|-------------------|-------------|
+> | Access by index | O(1) | O(n) |
+> | Insert/delete at end | Amortized O(1) | O(1) with tail |
+> | Insert/delete middle | O(n) shift | O(1) if you hold node |
+> | Memory | Contiguous, cache-friendly | Pointer-heavy, poor locality |
+> | Use | Random access, vectors, buffers | Rare in app code; LRU node wiring |
+>
+> **Architect take:** Prefer arrays/ArrayLists for almost everything in application code — CPU cache locality wins. Linked lists appear inside **LRU caches** (doubly linked list + hash map) and some queue internals, not as a primary business collection.
+>
+> **Real system:** Kafka partition log is append-friendly sequential storage (array/log-like), not a linked list of messages.
+
+---
+
+#### 3. Stack & Queue — Explain with real system examples.
+
+> **Answer:**
+>
+> **Stack (LIFO):** undo history, DFS recursion/call stack, expression parsing, browser back button. Ops: `push/pop/peek` O(1).
+>
+> **Queue (FIFO):** request buffers, BFS, printer jobs, message consumers. Ops: `enqueue/dequeue` O(1).
+>
+> **Deque / Priority queue variants:**
+> - **Circular buffer / ring queue** — high-performance in-memory queues
+> - **Delay queue** — seat-lock expiry, retry with backoff
+> - **Priority queue (heap)** — pager alerts by severity, task scheduling
+>
+> **Distributed systems mapping:**
+> - RabbitMQ / SQS ≈ distributed queue
+> - Kafka ≈ durable partitioned log (queue-like per partition, but replayable)
+> - Thread pools use work queues; overload → backpressure when queue fills
+
+---
+
+#### 4. Implement / Design an LRU Cache — which structures and why?
+
+> **Answer:** Need **O(1) get** and **O(1) put** including eviction of least-recently-used.
+>
+> **Structures:** `HashMap<key, Node>` + **doubly linked list** (head = most recent, tail = least recent).
+> - `get`: map lookup → move node to head
+> - `put`: if exists, update + move to head; if new and full, remove tail, insert at head
+>
+> **Why not only a map?** Map has no order. **Why not only a list?** Lookup is O(n).
+>
+> **Production:** Redis `MAXMEMORY` + `allkeys-lru`, CDN edge caches, CPU page cache, Guava/Caffeine caches in Java services.
+>
+> **Trade-offs:** LRU isn't always best — **LFU** (least frequently used) better for skewed "hot key" catalogs; **TTL** better for session data. Architect picks policy based on access pattern.
+>
+> ```java
+> // Interview-friendly: LinkedHashMap access-order
+> class LRUCache<K,V> extends LinkedHashMap<K,V> {
+>   private final int capacity;
+>   LRUCache(int capacity) { super(capacity, 0.75f, true); this.capacity = capacity; }
+>   protected boolean removeEldestEntry(Map.Entry<K,V> e) { return size() > capacity; }
+> }
+> ```
+
+---
+
+#### 5. Heap / Priority Queue — How do you find Top-K efficiently?
+
+> **Answer:** A **binary heap** gives O(1) peek of min or max, O(log n) insert/remove.
+>
+> **Top-K pattern (K << N):** Keep a **min-heap of size K**.
+> - For each element: if heap size < K, insert; else if element > heap.min, replace min
+> - Complexity **O(n log k)** vs sorting **O(n log n)**
+>
+> **Architect examples:**
+> - Top 10 trending products in last hour (Flink / stream job)
+> - P95/P99 approximation structures (or t-digest) for latency dashboards
+> - Scheduler picking next highest-priority job
+> - Merge K sorted Kafka partition iterators (min-heap of heads)
+>
+> **Spoken line:** *"At 10M events, I won't sort everything — I'll stream into a bounded heap of size K."*
+
+---
+
+#### 6. Binary Search Tree vs Hash Map vs B-Tree — What's the difference?
+
+> **Answer:**
+>
+> | Structure | Lookup | Ordered? | Typical use |
+> |-----------|--------|----------|-------------|
+> | Hash map | O(1) avg | No | In-memory dictionaries |
+> | Balanced BST (TreeMap) | O(log n) | Yes | Range queries in memory |
+> | B-Tree / B+Tree | O(log n) | Yes | **Database / FS indexes** |
+>
+> **Why B-Trees in databases:** Optimized for **disk/SSD pages** — high branching factor so height stays tiny; one disk read loads many keys. A binary tree would cause too many random I/O seeks.
+>
+> **Architect insight:** When you `CREATE INDEX` in Postgres/MongoDB/InnoDB, you're building a B-Tree (or similar). `WHERE user_id = ?` is O(log n) with index, O(n) without. Range query `created_at BETWEEN ? AND ?` needs ordered structure → B-Tree, not hash index.
+>
+> **Hash index:** O(1) equality, no ranges — good for exact PK lookups only.
+
+---
+
+#### 7. Graph — BFS vs DFS, and where do graphs appear in architecture?
+
+> **Answer:** Graph = nodes + edges (directed/undirected, weighted/unweighted).
+>
+> | Algorithm | Strategy | Use |
+> |-----------|----------|-----|
+> | **BFS** | Level by level (queue) | Shortest path in unweighted graph, service dependency breadth, friend-of-friend |
+> | **DFS** | Go deep (stack/recursion) | Cycle detection, topological ideas, maze/path existence |
+> | **Dijkstra / A\*** | Priority queue | Weighted shortest path (routing, networking) |
+> | **Topo sort** | Kahn / DFS | Build pipelines, course scheduling, migration order |
+>
+> **Real architecture graphs:**
+> - Microservice dependency graph (who calls whom) — detect cycles = distributed monolith smell
+> - Kubernetes network policies / service mesh call graph
+> - Fraud rings (accounts linked by devices)
+> - Airflow DAG = directed acyclic graph of tasks
+> - Recommendation "users who bought X also bought Y"
+>
+> **Spoken example:** *"We BFS'd the service call graph from the checkout API and found a 6-hop sync chain — that became our circuit-breaker and async-refactor target."*
+
+---
+
+#### 8. Trie (Prefix Tree) — When is it better than a hash map?
+
+> **Answer:** A trie stores strings character-by-character sharing prefixes. Lookup/autocomplete is **O(L)** in key length, independent of number of keys (for practical alphabets).
+>
+> **Better than hash map when:**
+> - Prefix search / autocomplete (`"keyb"` → keyboard, keychain)
+> - IP routing / longest-prefix match
+> - Dictionary / spell-check
+> - Shared prefix compression for huge dictionaries
+>
+> **Worse when:** You only need exact lookup — hash map is simpler and usually faster.
+>
+> **System design link:** Search-as-you-type boxes, API gateway route matching, Redis `SCAN` patterns aren't tries but OpenSearch/ES edge n-grams solve similar prefix needs at scale. For an in-service autocomplete of 100K product names, an in-memory trie (or sorted list + binary search) can be enough before introducing OpenSearch.
+
+---
+
+#### 9. Bloom Filter — How does it save memory, and what's the catch?
+
+> **Answer:** A Bloom filter is a **probabilistic set** using a bit array + multiple hash functions.
+>
+> - `add(x)`: set k bits
+> - `mightContain(x)`: if any bit is 0 → **definitely not present**; if all 1 → **maybe present**
+>
+> | Property | Reality |
+> |----------|---------|
+> | False positives | Possible (configurable rate, e.g. 1%) |
+> | False negatives | **Never** |
+> | Delete | Not in classic Bloom (use Counting Bloom if needed) |
+> | Space | Tiny vs storing full keys |
+>
+> **Architect uses:**
+> - CDN / cache: "skip DB if definitely not in cache population"
+> - Kafka / event dedup pre-check before hitting Redis/DB
+> - Username "maybe taken" check
+> - Bigtable / Cassandra / RocksDB: avoid useless disk reads (HLL/Bloom at SSTable level)
+>
+> **Trade-off line:** *"1% false positives are fine if the next layer is an exact idempotency check — we trade memory for a cheap negative filter."*
+
+---
+
+#### 10. Consistent Hashing — How does it beat `hash % N` for sharding?
+
+> **Answer:** `hash(key) % N` remaps nearly **all keys** when N changes (add/remove a node). **Consistent hashing** places nodes and keys on a ring; a key maps to the first node clockwise. Add/remove affects only ~**1/N** of keys.
+>
+> **Virtual nodes:** Each physical node gets many points on the ring → even load with few machines.
+>
+> **Where it shows up:**
+> - Redis Cluster hash slots (16,384) — conceptual cousin
+> - Cassandra / Dynamo-style partitioners
+> - Client-side Memcached pools
+> - CDN / edge assignment
+> - Sticky session routing alternatives
+>
+> **Ticket-booking / hot-key link:** Consistent hashing spreads load, but a single viral `showId` can still hotspot one shard — then you need **bounded queues**, finer shards (section-level), or special hot-key handling.
+>
+> ```java
+> // Naive (bad on rescale)
+> int shard = Math.floorMod(userId.hashCode(), shardCount);
+> // Production: hash ring with virtual nodes (Guava, custom, or cluster-native)
+> ```
+
+---
+
+### Quick Drill — Pick the Structure (30-second answers)
+
+| Prompt | Structure |
+|--------|-----------|
+| Autocomplete city names | Trie |
+| Top 5 disliked posts | Max-heap / min-heap of size 5 |
+| Detect cycle in service calls | Graph + DFS |
+| Cache with eviction | Hash map + DLL (LRU) |
+| "Have we seen this event ID?" at huge scale | Bloom filter → exact store |
+| Range query on timestamps | B-Tree index |
+| Shard 200M keys across 12 nodes | Consistent hashing |
+| Undo in an editor | Stack |
+| Shortest hops between users | BFS |
+| Fair task scheduling by priority | Heap (priority queue) |
+
 ---
 
 ## 11. Node.js
@@ -2676,6 +2901,14 @@ EVENT-DRIVEN ARCHITECTURE
   Task queue / work distribution → RabbitMQ or SQS
   Event stream / CDC / replay / many consumers → Kafka
 
+DATA STRUCTURES
+  Hash map O(1); B-Tree for DB indexes / ranges
+  LRU = HashMap + doubly linked list
+  Top-K = bounded min-heap O(n log k)
+  Bloom filter = maybe-yes, never false-negative
+  Consistent hashing = rescale without remapping all keys
+  Graph BFS/DFS for dependency / shortest-path problems
+
 DATA
   MongoDB  → flexible documents, index-aware queries
   Redis    → cache/sessions/rate limits; define failure behavior
@@ -2717,6 +2950,7 @@ DEVOPS
 10. Describe expand-migrate-contract for zero-downtime DB migrations
 11. Answer "How do you define service boundaries?" using DDD bounded contexts
 12. State your Node.js vs Java decision criteria for a new microservice
+13. Drill top 10 DS picks: LRU, Top-K heap, Bloom filter, B-Tree vs hash, consistent hashing
 
 ---
 
@@ -2746,6 +2980,7 @@ Use this to verify you can answer each question in 90–120 seconds with the COT
 | 18 | Compare cache-aside, write-through, write-behind | §9 |
 | 19 | Design a distributed rate limiter with Redis | §9 |
 | 20 | When do algorithms matter at the architect level? | §10 |
+| 20a | Top 10 DS: hash map, LRU, heap Top-K, B-Tree, graph, trie, Bloom, consistent hashing | §10 |
 | 21 | Explain the Node.js event loop | §11 |
 | 22 | How do you handle errors in production Node.js? | §11 |
 | 23 | When do you choose Java over Node.js? | §12 |
