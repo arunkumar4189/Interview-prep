@@ -5,6 +5,24 @@ Use this with [`technical-architect-interview-guide.md`](./technical-architect-i
 
 ---
 
+## Feedback Remediation — 5-Day Plan
+
+> Use if your panel said you need deeper **Java runtime, ORM, messaging, K8s, and complex scenarios** — see [`feedback-remediation-guide.md`](./feedback-remediation-guide.md).
+
+| Day | Focus | Read | Practice (90 min) |
+|-----|-------|------|-------------------|
+| **1** | Java runtime | Remediation §1 | Draw JVM memory map; G1 vs ZGC for payment API (3 min timed); thread vs connection pool sizing |
+| **2** | ORM / Hibernate | Remediation §2 | N+1 + 3 fixes; `@Transactional` bugs; optimistic vs pessimistic locking |
+| **3** | Messaging deep | Remediation §3 | Kafka partitions + consumer groups; RabbitMQ ACK/prefetch/DLX; outbox pattern |
+| **4** | Kubernetes | Remediation §4 | Control plane + networking diagram; rolling update; JVM pod memory sizing |
+| **5** | Complex scenarios | Remediation §5 | Double-charge retry + p99 latency scenarios; [Mock Round 4](./mock-interview-practice.md#round-4--feedback-remediation-60-minutes) |
+
+**Daily:** 45 min read + 30 min timed spoken + 15 min remediation self-assessment.
+
+**Priority:** Score remediation self-assessment ≥2 before returning to generic HLD review — panels will re-probe these gaps.
+
+---
+
 ## Before You Start (30 minutes)
 
 1. **Read §1** (COTDO framework) — this is how every answer should sound.
