@@ -2954,7 +2954,49 @@ DEVOPS
 
 ---
 
-## Appendix: Top Interview Questions Checklist
+## Appendix A: Self-Assessment
+
+Rate yourself **before** deep studying and **again** 24 hours before the interview.
+
+| Score | Meaning | Action |
+|-------|---------|--------|
+| **0** | Can't answer | Read section + write 3 bullet summary |
+| **1** | Know topic, can't speak it | Record 90-sec answer twice |
+| **2** | Solid under time | Light review only |
+| **3** | Trade-offs + metrics + failure modes | Teach someone else / mock probe |
+
+**Target:** all Appendix B questions at **≥2**; your expected top 10 at **≥3**.
+
+| # | Topic | Score (0–3) | Section | Notes |
+|---|-------|-------------|---------|-------|
+| 1 | Answer structure (COTDO) | | §1 | |
+| 2 | CAP + consistency | | §2 | |
+| 3 | Saga pattern | | §2 | |
+| 4 | Microservice boundaries | | §3 | |
+| 5 | AWS service design | | §3 | |
+| 6 | Idempotency / at-least-once | | §4 | |
+| 7 | Consistent hashing | | §4 | |
+| 8 | RabbitMQ vs Kafka | | §5 | |
+| 9 | Temporal vs Airflow | | §6 | |
+| 10 | MongoDB schema + transactions | | §7 | |
+| 11 | OpenSearch sync | | §8 | |
+| 12 | Redis caching + rate limit | | §9 | |
+| 13 | Top DS at scale (LRU, Top-K, Bloom) | | §10 | |
+| 14 | Node event loop | | §11 | |
+| 15 | Java vs Node choice | | §12 | |
+| 16 | SOLID + circuit breaker | | §13 | |
+| 17 | TDD / tech debt | | §14 | |
+| 18 | Latency debug + SLOs | | §15 | |
+| 19 | K8s / zero-downtime migration | | §16 | |
+| 20 | E-commerce system design | | §17 | |
+| 21 | Ticket booking design | | §17 | |
+| 22 | STAR stories (2+) | | §18 | |
+
+**Practice files:** [interview-study-plan.md](./interview-study-plan.md) · [mock-interview-practice.md](./mock-interview-practice.md)
+
+---
+
+## Appendix B: Top Interview Questions Checklist
 
 Use this to verify you can answer each question in 90–120 seconds with the COTDO framework.
 
