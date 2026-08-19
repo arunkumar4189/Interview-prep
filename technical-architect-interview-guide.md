@@ -27,6 +27,8 @@
 18. [Behavioral & Communication](#18-behavioral--communication)
 19. [Quick Reference Cheat Sheet](#19-quick-reference-cheat-sheet)
 
+**Practice:** [Study plan](./interview-study-plan.md) · [Mock interviews](./mock-interview-practice.md) · [Feedback remediation](./feedback-remediation-guide.md) (Java runtime, ORM, messaging, K8s depth)
+
 ---
 
 ## 1. How to Structure Answers

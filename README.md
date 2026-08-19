@@ -10,6 +10,7 @@ Structured preparation for **Technical Architect** interviews — spoken answers
 
 | If you have… | Do this |
 |--------------|---------|
+| **Panel feedback on Java runtime / ORM / messaging / K8s depth** | [**Feedback remediation guide**](./feedback-remediation-guide.md) + [5-day plan](./interview-study-plan.md#feedback-remediation-5-day-plan) |
 | **7+ days** | [7-day study plan](./interview-study-plan.md) |
 | **1–2 days** | [24-hour cram path](./interview-study-plan.md#if-you-have-24-hours) + [Mock Round 3](./mock-interview-practice.md#round-3--ticket-booking--rapid-fire-40-minutes) |
 | **Today** | [Monday 15-min review](./technical-architect-interview-guide.md#monday-morning-15-minute-review) + one mock round |
@@ -22,7 +23,8 @@ Structured preparation for **Technical Architect** interviews — spoken answers
 |------|---------|
 | [**technical-architect-interview-guide.md**](./technical-architect-interview-guide.md) | Main reference — detailed spoken answers, code sketches, 3 system designs, STAR templates, cheat sheet |
 | [**interview-study-plan.md**](./interview-study-plan.md) | Day-by-day schedule, checklists, practice method |
-| [**mock-interview-practice.md**](./mock-interview-practice.md) | 3 timed mock rounds + scoring rubric |
+| [**mock-interview-practice.md**](./mock-interview-practice.md) | 4 timed mock rounds + scoring rubric |
+| [**feedback-remediation-guide.md**](./feedback-remediation-guide.md) | Deep dives on Java runtime, ORM, messaging, K8s, complex scenarios (from panel feedback) |
 
 ---
 

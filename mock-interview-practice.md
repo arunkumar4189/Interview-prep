@@ -281,4 +281,88 @@ When all rounds **≥2.0** and system design rows **≥2**, you're interview-rea
 
 ---
 
+---
+
+## Round 4 — Feedback remediation (60 minutes)
+
+*Simulates: panel that passed you on HLD but failed depth on Java runtime, ORM, messaging, K8s.*
+
+Use [`feedback-remediation-guide.md`](./feedback-remediation-guide.md) to self-grade.
+
+### Part A — Java runtime (15 min, ~3 min each)
+
+**Q31.** Walk through JVM memory areas — what causes OOM in a container?
+
+**Q32.** G1 vs ZGC — which for a payment service with p99 < 50ms? How do you validate?
+
+**Q33.** How does JIT warmup affect Kubernetes rolling deploys?
+
+**Q34.** Thread pool exhausted vs connection pool exhausted — how do you tell in a thread dump?
+
+<details>
+<summary>Probe</summary>
+
+- What if heap looks fine but pod is OOMKilled?
+- Why set `-Xms = -Xmx`?
+
+</details>
+
+---
+
+### Part B — ORM (12 min)
+
+**Q35.** Explain the N+1 problem — detect and fix in a Spring Boot order service.
+
+**Q36.** Optimistic vs pessimistic locking for flash-sale inventory — trade-offs.
+
+**Q37.** When would you avoid JPA and use jOOQ or JDBC?
+
+<details>
+<summary>Probe</summary>
+
+- What causes LazyInitializationException?
+- Would you use Hibernate 2nd level cache for product catalog?
+
+</details>
+
+---
+
+### Part C — Messaging (12 min)
+
+**Q38.** Kafka: partitions, consumer groups, and what limits parallelism.
+
+**Q39.** RabbitMQ: manual ACK, prefetch, and dead-letter handling for poison messages.
+
+**Q40.** How do you achieve reliable publish from DB write without dual-write to Kafka?
+
+<details>
+<summary>Probe</summary>
+
+- Consumer lag spike after deploy — first 3 checks?
+- `acks=all` vs `acks=1` — when is 1 acceptable?
+
+</details>
+
+---
+
+### Part D — Kubernetes (10 min)
+
+**Q41.** Service vs Ingress vs NetworkPolicy — draw request path from internet to pod.
+
+**Q42.** Rolling update settings for zero downtime with a Java Spring Boot app.
+
+**Q43.** How do you size memory request/limit for a JVM container?
+
+---
+
+### Part E — Complex scenario (15 min)
+
+**Q44.** Payment gateway times out; clients retry; customers report double charges. Walk through detection → fix → prevention.
+
+**Q45.** Java checkout service: traffic doubled, p99 latency 3s, error rate normal. Debug layers in order.
+
+**Pass:** average ≥2.5 on Parts A–D; both scenarios name idempotency, pool/GC/N+1, and systemic prevention.
+
+---
+
 *Pair with [`interview-study-plan.md`](./interview-study-plan.md) for daily scheduling.*
