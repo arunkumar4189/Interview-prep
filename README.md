@@ -21,6 +21,7 @@ Structured preparation for **Technical Architect** interviews — spoken answers
 
 | File | Purpose |
 |------|---------|
+| [**enterprise-genai-solution-architect-interview-prep.md**](./enterprise-genai-solution-architect-interview-prep.md) | **Enterprise GenAI Solution Architect JD** — agents, hybrid RAG, LLM gateway, MCP, governance, cloud, Friday study plan |
 | [**technical-architect-interview-guide.md**](./technical-architect-interview-guide.md) | Main reference — detailed spoken answers, code sketches, 3 system designs, STAR templates, cheat sheet |
 | [**interview-study-plan.md**](./interview-study-plan.md) | Day-by-day schedule, checklists, practice method |
 | [**mock-interview-practice.md**](./mock-interview-practice.md) | 4 timed mock rounds + scoring rubric |
