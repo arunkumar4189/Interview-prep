@@ -21,6 +21,7 @@ Structured preparation for **Technical Architect** interviews — spoken answers
 
 | File | Purpose |
 |------|---------|
+| [**docs/tekion-tamc-architect/**](./docs/tekion-tamc-architect/README.md) | **Tekion TAMC Architect JD** — detailed markdown study guide (Java, distributed systems, DB/events/cache, cloud/ops, forum Q&A) tailored to Verizon ordering + Agentic Universe |
 | [**enterprise-genai-solution-architect-interview-prep.md**](./enterprise-genai-solution-architect-interview-prep.md) | **Enterprise GenAI Solution Architect JD** — agents, hybrid RAG, LLM gateway, MCP, governance, cloud, Friday study plan |
 | [**technical-architect-interview-guide.md**](./technical-architect-interview-guide.md) | Main reference — detailed spoken answers, code sketches, 3 system designs, STAR templates, cheat sheet |
 | [**interview-study-plan.md**](./interview-study-plan.md) | Day-by-day schedule, checklists, practice method |
