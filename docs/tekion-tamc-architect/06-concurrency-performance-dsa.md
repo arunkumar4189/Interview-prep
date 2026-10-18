@@ -1,228 +1,140 @@
 # Concurrency, performance tuning, and DSA (detailed)
 
+**Examples from:** bulk engine (**P2**), North Star Reactive (**P1**), case pause/resume (**P6**), PaymentMs (**P3**), cart validation (**P4**).
+
+Catalog: [11-your-projects-catalog.md](./11-your-projects-catalog.md).
+
 ---
 
 ## Part 1 — Concurrency
 
-### 1.1 The classic race (budget / slot / cap)
+### 1.1 Race on payment or inventory hold (P3 — Tekion payment question)
 
-**Broken:**
+**Broken (review comment we blocked):**
 
 ```java
-int remaining = budget.getRemaining();
-if (remaining >= amount) {
-  budget.setRemaining(remaining - amount); // two threads both pass
+if (payment.getRemaining() >= amount) {
+  payment.setRemaining(remaining - amount);
 }
 ```
 
-**Fixed (Postgres):**
+**Fixed — conditional update (PaymentMs):**
 
 ```sql
-UPDATE budget
+UPDATE payment_budget
 SET reserved_cents = reserved_cents + :amount
-WHERE tenant_id = :t AND budget_id = :b
+WHERE tenant_id = :t AND partner_id = :p
   AND reserved_cents + :amount <= limit_cents;
 ```
 
-JDBC `executeUpdate() == 0` → conflict to client.
+`executeUpdate() == 0` → reject that **line’s** payment attempt; other lines in **P2** batch continue.
 
-Same pattern for **service-center slot** (Tekion senior HLD) and **movie seat** booking.
+When interviewer asks **movie seat / service slot**, say: “Same SQL pattern we used on **payment reservation per order line**.”
 
-### 1.2 Optimistic locking (campaign version)
+### 1.2 Optimistic locking — PEGA case pause/resume (P6)
 
 ```java
 @Transactional
-public void pause(CampaignId id, int expectedVersion) {
-  int updated = repo.pauseIfVersion(id, expectedVersion);
-  if (updated == 0) throw new ConflictException();
+public void resumeCase(CaseId id, int expectedVersion) {
+  if (caseRepo.resumeIfVersion(id, expectedVersion) == 0)
+    throw new ConflictException("Case updated by another rep or worker");
 }
 ```
 
-### 1.3 Thread pools and backpressure
+Two reps clicking pause/resume or a rep + bulk worker touching same case id.
 
-**Bulk send workers:**
+### 1.3 Bulk line workers (P2)
 
-- Semaphore `32` concurrent ESP calls per pod.
-- Queue depth bounded; else memory blow-up.
-- **Hikari pool size** ≈ `(postgres_max_connections - admin) / num_pods` — not “200 because we use virtual threads.”
+- **Semaphore** on concurrent downstream order-domain calls per pod (bound to Cassandra/PEGA pool—not “unlimited threads”).
+- **Hikari:** `(max_connections - admin) / pod_count`—we saw incidents when fan-out opened one session per line.
 
-### 1.4 Spring Reactive (your stack)
+### 1.4 Spring Reactive (P1)
 
-Blocking call on event loop thread → latency collapse for all requests.
-
-Pattern:
+Legacy quote adapter (**P7**) on event loop = outage.
 
 ```java
-return repository.find(...)
-  .flatMap(order -> 
-      Mono.fromCallable(() -> legacyClient.call(order))
-          .subscribeOn(Schedulers.boundedElastic()))
-  .flatMap(this::save);
+return enrollmentService.load(id)
+  .flatMap(e -> Mono.fromCallable(() -> legacyQuoteClient.fetch(e))
+      .subscribeOn(Schedulers.boundedElastic()))
+  .flatMap(this::persist);
 ```
 
-`boundedElastic` queue must be **bounded**; monitor rejected tasks.
+### 1.5 Parallelism vs concurrency (Tekion parking lot)
 
-### 1.5 Virtual threads (Java 21)
+- **P2:** 10k lines **concurrent** in queue; **parallel** workers capped by pool and downstream.
+- **P11 ATG POS:** fewer parallel checkout lanes, many concurrent sessions—Retail Flex Flow optimized transaction time without unbounded threads.
 
-- Tomcat can use VT per request.
-- Still limit outbound HTTP client max connections.
-- Avoid pinning: don’t hold `synchronized` across I/O on hot path.
+### 1.6 Log4j-style async appender (Tekion LLD)
 
-### 1.6 Parallelism vs concurrency (Tekion parking-lot round)
-
-- **Concurrency:** many tasks in progress (IO wait).
-- **Parallelism:** many CPUs doing work simultaneously.
-
-Send workers: high **concurrency**, limited **parallelism** to ESP (rate limit).
-
-### 1.7 Java concurrency interview topics (SDE-1 HM round)
-
-- `synchronized` vs `ReentrantLock`
-- `ConcurrentHashMap` for in-memory TTL cache
-- Deadlock: two locks opposite order—avoid by lock ordering
-- **Thread-safe** Log4j-style appender queue (async logging LLD)
+If asked: async queue + worker thread draining to appenders—same backpressure lesson as **boundedElastic** queue on **P1**.
 
 ---
 
-## Part 2 — Performance tuning
+## Part 2 — Performance tuning (measured on ordering)
 
-### 2.1 Measure first (your credibility)
+### 2.1 Business metric — order dropout (P1 + P2)
 
-**Ordering:** New Relic **order dropout**—business metric.
+**New Relic:** `lines_accepted - lines_completed` (or order accepted vs order created).
 
-**TAMC equivalents:**
+CPU can look healthy while dropouts climb—**that** is what we paged on.
 
-| Metric | Meaning |
-|--------|---------|
-| `launch_accepted - launch_terminal` | Stuck launches |
-| Consumer lag | Backlog |
-| ESP timeout rate | Adapter health |
-| `sold_event_time - suppress_observed_time` | VIN suppress SLA |
-| p99 accept API | User-facing |
+### 2.2 Bulk payload knobs (P2)
 
-### 2.2 Bulk payload tuning (10k orders / 200k recipients)
+| Knob | Tuning story |
+|------|----------------|
+| Accept path | Only header + outbox—p99 stays low |
+| Messages per batch | Line-per-message vs chunk—trade retry blast radius |
+| Worker count | Scale until **PEGA/credit/order DB** saturates, not until CPU hits 100% |
+| JDBC/Cassandra batch writes | Batch status updates in groups |
 
-| Knob | Too small | Too large |
-|------|-----------|-----------|
-| Chunk size | Broker overhead | One retry repeats huge vendor batch |
-| JDBC batch | Many round trips | Long transactions |
-| Worker count | Slow drain | DB/ESP saturation |
+**10,000+** is **lines per payload**, not RPS—state clearly.
 
-**Study numbers (campaign):**
+### 2.3 Async cart validation (P4)
 
-- Chunk 500 recipients
-- 32 concurrent ESP calls per pod
-- 8 pods → still capped by **50 ESP rps** account limit → use **Redis rate limiter**
+Moved CPU/IO heavy validation off HTTP thread—same accept/poll API as bulk batch.
 
-### 2.3 N+1 queries
+### 2.4 GraphQL N+1 (P1)
 
-Launch status: don’t load 200k attempts for dashboard—**counter table** updated by events.
-
-### 2.4 Caching for read perf
-
-Campaign config in Redis—see [05-databases-events-caching.md](./05-databases-events-caching.md).
-
-### 2.5 Async validation (your 2018–2021 work)
-
-Large B2B cart validation off HTTP thread—same as launch accept: **202 + job**.
+DataLoader or batched domain calls—otherwise enrollment screen fans out 50 REST calls.
 
 ---
 
-## Part 3 — DSA (Tekion-reported problems)
+## Part 3 — DSA (Tekion reports — practice in Java)
 
-Confirm if Architect loop includes coding. If yes, practice in **Java**.
+Still use LeetCode for interview loop; **explain using your context** where possible.
 
-### 3.1 Common intervals (two pointers)
+### 3.1 Common intervals
 
-**Input:**
+Reported in Tekion SDE-2 round—useful for **merging validation windows** on cart promotions or **time-bounded bulk upload windows** (conceptual). Algorithm: two pointers—see previous doc for `[1,4],[4,5],...` output.
 
-- A: `[1,5], [7,9], [9,11]`
-- B: `[0,4], [4,10], [11,13]`
+### 3.2 Largest rectangle in histogram
 
-**Algorithm:**
+Chennai Tekion SDE-2 (2026)—monotonic stack O(n). No direct ordering tie-in required; pass coding round.
 
-```java
-List<Interval> common(List<Interval> a, List<Interval> b) {
-  List<Interval> out = new ArrayList<>();
-  int i = 0, j = 0;
-  while (i < a.size() && j < b.size()) {
-    int start = Math.max(a.get(i).start, b.get(j).start);
-    int end = Math.min(a.get(i).end, b.get(j).end);
-    if (start <= end) out.add(new Interval(start, end));
-    if (a.get(i).end < b.get(j).end) i++; else j++;
-  }
-  return out;
-}
-```
+### 3.3 Resource usage over intervals (Staff AI Tekion)
 
-**Output:** `[1,4], [4,5], [7,9], [9,10], [11,11]`  
-(Some public write-ups omit `[4,5]`—include it.)
+Sweep line for **concurrent bulk workers** or **concurrent enrollment checks**—max overlapping intervals = peak pool size you sized.
 
-**Complexity:** O(n + m) time, O(output) space.
+### 3.4 Policy engine evaluator (Tekion Reddit)
 
-### 3.2 Largest rectangle in histogram (monotonic stack)
-
-Heights: `[2,1,5,6,2,3]`
-
-Maintain stack of **indices** with increasing heights. When pop, width = current index - new top - 1.
-
-**Answer:** max area **10** (heights 5 and 6).
-
-```java
-int largestRectArea(int[] h) {
-  Deque<Integer> st = new ArrayDeque<>();
-  int best = 0;
-  for (int i = 0; i <= h.length; i++) {
-    int cur = (i == h.length) ? 0 : h[i];
-    while (!st.isEmpty() && h[st.peek()] > cur) {
-      int height = h[st.pop()];
-      int width = st.isEmpty() ? i : i - st.peek() - 1;
-      best = Math.max(best, height * width);
-    }
-    st.push(i);
-  }
-  return best;
-}
-```
-
-### 3.3 Other frequent Tekion problems
-
-| Problem | Technique |
-|---------|-----------|
-| Search rotated sorted array | Modified binary search |
-| Longest substring without repeat | Sliding window + HashMap |
-| Next greater element | Monotonic stack |
-| Number of islands | DFS/BFS O(mn) |
-| Koko eating bananas | Binary search on answer |
-| Max sum subarray unique elements | Sliding window + Set |
-| Coin change | DP |
-| Resource usage over intervals (Staff AI) | Sort by start, sweep line / priority queue |
-
-### 3.4 “Maximum resources over intervals” (Staff AI DSA)
-
-Intervals: `[1,4]→3`, `[3,5]→2`, `[4,6]→4`
-
-Sweep time points; add/subtract resources → max concurrent **6** at t=4.
+Implement AND/OR tree—**same structure as credit rules** you integrated (**P5**): leaves compare fields, composite nodes AND/OR.
 
 ---
 
-## Part 4 — Low-level design patterns Tekion likes
+## Part 4 — LLD prompts → your projects
 
-| Prompt | Core classes |
-|--------|----------------|
-| Elevator | `Elevator`, `Controller`, `Request`, state `IDLE/MOVING` |
-| Parking lot | `Lot`, `Spot`, `Ticket`, payment idempotency |
-| TTL cache | `Cache<K,V>`, `Entry` with expiry, sweeper |
-| Log4j-like | `Logger`, `Appender`, `Layout`, async queue |
-| Policy engine | `Policy`, `Condition` AND/OR tree, `Evaluator` |
-| LFU cache | `Map` + frequency buckets (LeetCode 460) |
-
-**State diagram** for elevator—Tekion explicitly asked in one loop.
+| Tekion LLD | Answer from your work |
+|------------|----------------------|
+| TTL cache | ConfigMs catalog cache (**P3**) with per-entry expiry |
+| Elevator | Use if asked generically; optional tie: “task scheduling for line workers” (**P2**) |
+| Parking lot | Payment hold + slot = **PaymentMs** reserve pattern |
+| Food delivery | **P2** batch + **P3** payment + line failure isolation |
+| LFU cache | Less common in your story—TTL cache from ConfigMs is stronger |
 
 ---
 
-## Part 5 — Practice plan (3 hours)
+## Part 5 — 3-hour practice
 
-1. Implement common intervals + histogram in Java without IDE hints.
-2. Explain budget `UPDATE` race on whiteboard.
-3. Walk bulk engine → Kafka mapping with idempotency keys.
+1. Whiteboard **P2** accept → Rabbit → idempotent consumer.
+2. SQL conditional payment update (**P3**).
+3. Java: common intervals + histogram once each.

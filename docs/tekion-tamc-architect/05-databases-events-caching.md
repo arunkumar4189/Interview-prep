@@ -1,108 +1,14 @@
 # Database design, caching, and event-driven systems (detailed)
 
----
+**Examples from:** North Star + Cassandra (**P1**), bulk engine + RabbitMQ (**P2**), Cart/Config/Payment (**P3**), Agentic Universe Postgres (**P9**), SRE OpenSearch (**P10**).
 
-## 1. Relational design (Postgres) — money, consent, workflow
-
-### Campaign state machine
-
-```sql
-CREATE TABLE campaign (
-  tenant_id    TEXT NOT NULL,
-  campaign_id  TEXT NOT NULL,
-  status       TEXT NOT NULL CHECK (status IN (
-    'DRAFT','IN_REVIEW','APPROVED','SCHEDULED',
-    'RUNNING','PAUSED','COMPLETED','CANCELLED'
-  )),
-  version      INT NOT NULL DEFAULT 1,
-  PRIMARY KEY (tenant_id, campaign_id)
-);
-
--- Legal transition example:
-UPDATE campaign
-SET status = 'RUNNING', version = version + 1
-WHERE tenant_id = $1 AND campaign_id = $2
-  AND status = 'APPROVED' AND version = $3;
--- 0 rows updated → 409 conflict
-```
-
-**Why version column:** optimistic locking without locking whole table.
-
-### Ledger (co-op / dealer spend)
-
-Append-only entries; balance is sum or projection.
-
-```sql
-CREATE TABLE ledger_entry (
-  tenant_id     TEXT NOT NULL,
-  entry_id      TEXT NOT NULL,
-  budget_id     TEXT NOT NULL,
-  attempt_id    TEXT NOT NULL,
-  entry_type    TEXT NOT NULL CHECK (entry_type IN (
-    'RESERVE','COMMIT','RELEASE','ADJUST'
-  )),
-  amount_cents  BIGINT NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (tenant_id, entry_id),
-  UNIQUE (tenant_id, attempt_id, entry_type)
-);
-```
-
-**Reserve in same transaction as accepting a billable send attempt:**
-
-```sql
-UPDATE budget
-SET reserved_cents = reserved_cents + $amount
-WHERE tenant_id = $t AND budget_id = $b
-  AND reserved_cents + $amount <= limit_cents;
-```
-
-`0 rows` → reject send (or queue).
-
-### Consent
-
-```sql
-CREATE TABLE consent (
-  tenant_id    TEXT NOT NULL,
-  consumer_id  TEXT NOT NULL,
-  channel      TEXT NOT NULL,
-  allowed      BOOLEAN NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (tenant_id, consumer_id, channel)
-);
-```
-
-Send path: **read Postgres** (or short TTL cache with tenant in key). **Never** infer consent from Elasticsearch.
-
-### Audience snapshot
-
-Immutable for a launch:
-
-```sql
-CREATE TABLE audience_snapshot (
-  tenant_id    TEXT NOT NULL,
-  snapshot_id  TEXT NOT NULL,
-  campaign_id  TEXT NOT NULL,
-  created_at   TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (tenant_id, snapshot_id)
-);
-
-CREATE TABLE audience_member (
-  tenant_id    TEXT NOT NULL,
-  snapshot_id  TEXT NOT NULL,
-  member_id    TEXT NOT NULL,
-  consumer_id  TEXT NOT NULL,
-  PRIMARY KEY (tenant_id, snapshot_id, member_id)
-);
-```
-
-CRM can change tomorrow; launch audit uses snapshot only.
+Catalog: [11-your-projects-catalog.md](./11-your-projects-catalog.md).
 
 ---
 
-## 2. NoSQL (Cassandra) — your ordering model
+## 1. Cassandra (P1) — orders and batch lines
 
-### Table for “recent orders by tenant”
+### Orders by tenant (what you modeled)
 
 ```sql
 CREATE TABLE orders_by_tenant (
@@ -110,171 +16,180 @@ CREATE TABLE orders_by_tenant (
   created_at timestamp,
   order_id text,
   status text,
+  batch_id text,
   PRIMARY KEY ((tenant_id), created_at, order_id)
 ) WITH CLUSTERING ORDER BY (created_at DESC);
 ```
 
-**Valid query:** `WHERE tenant_id = ? LIMIT 20`
+**Legal:** recent orders for SMB tenant.
 
-**Invalid on this table alone:** `WHERE status = 'FAILED'` (full cluster scan).
+**Illegal alone:** `WHERE status = 'FAILED'` across cluster → need `orders_by_tenant_status`.
 
-**Fix:** second table `orders_by_tenant_status` with `PRIMARY KEY ((tenant_id, status), created_at, order_id)` fed by same write path.
+### Batch line processing (P2)
 
-### Partition key lesson (you taught vendors)
+```sql
+CREATE TABLE batch_line_status (
+  tenant_id text,
+  batch_id text,
+  line_id text,
+  status text,
+  last_error text,
+  PRIMARY KEY ((tenant_id, batch_id), line_id)
+);
+```
 
-- Hot partition = one `tenant_id` with all traffic → add **bucket** `tenant_id + yyyyMMdd` for history.
-- **10k orders per payload** is write burst—size batches, async fan-out, don’t single-row update a counter 10k times in one partition without thinking.
+Partition `(tenant_id, batch_id)` keeps one partner upload colocated.
 
-### Agentic Universe (Postgres, not Cassandra)
-
-Run history, approval, workflow state—**transactions and joins** matter. Use that as “when SQL wins.”
+**Teaching moment (you mentored vendors):** hot partition = one `tenant_id` with all history in one partition without bucketing—add `tenant_id + yyyyMMdd` for historical tables if needed.
 
 ---
 
-## 3. Caching strategies
+## 2. Postgres (P9 Agentic Universe) — workflow you shipped recently
 
-### 3.1 Cache-aside (campaign config)
+```sql
+CREATE TABLE agent_run (
+  run_id        UUID PRIMARY KEY,
+  tenant_id     TEXT NOT NULL,
+  workflow_id   TEXT NOT NULL,
+  status        TEXT NOT NULL,  -- RUNNING, AWAITING_APPROVAL, COMPLETED, FAILED
+  current_step  INT NOT NULL,
+  version       INT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL
+);
 
-```
-read:
-  v = redis.get(key)
-  if v: return v
-  v = db.load(campaign)
-  redis.setex(key, 60, v)
-  return v
-
-invalidate on:
-  campaign approve/pause/VIN suppress event → redis.del(key)
-```
-
-Key: `camp:v1:{tenantId}:{campaignId}`
-
-### 3.2 Thundering herd
-
-20 workers miss → 20 DB queries.
-
-**Singleflight:**
-
-```
-if redis.set(lockKey, 1, NX, EX=5):
-    v = db.load(...)
-    redis.set(dataKey, v, EX=60)
-    redis.del(lockKey)
-else:
-    sleep/backoff; read dataKey
+CREATE TABLE agent_run_approval (
+  run_id       UUID PRIMARY KEY,
+  approved_by  TEXT,
+  approved_at  TIMESTAMPTZ,
+  decision     TEXT NOT NULL
+);
 ```
 
-### 3.3 What must NOT be cache-only
+**Why Postgres here:** human approval + audit trail + transactions—not a good fit for Cassandra on this workload.
 
-| Data | Why |
-|------|-----|
-| Ledger balance | Eviction → overspend |
-| Consent (long-term) | Legal record in Postgres |
-| Frequency cap counter | Unless atomic store (Aerospike/Redis Lua) |
-
-Redis **rate limit** (50 ESP calls/s) is OK—see [08-good-to-have-stack.md](./08-good-to-have-stack.md).
-
-### 3.4 Tekion LLD: TTL cache library
-
-They asked candidates to **code** a TTL cache (Chennai SDE-2, 2026):
-
-- Interface `get/put`
-- Per-entry expiry
-- Optional background sweeper
-- Thread-safe `ConcurrentHashMap` + `ScheduledExecutor` or lazy expiry on read
-
-Connect to your Redis usage: same semantics, different scale.
+**Pause/resume analogy (P6):** `AWAITING_APPROVAL` is like case paused—no downstream side effect until approval row exists.
 
 ---
 
-## 4. Event-driven systems
+## 3. Payment idempotency (P3 PaymentMs — Tekion forum question)
 
-### 4.1 Your RabbitMQ bulk engine
-
-| Step | Behavior |
-|------|----------|
-| Accept | Persist batch |
-| Publish | One message per line |
-| Consume | Idempotent on line id |
-| Failure | DLQ + alert |
-| Metric | accepted - completed |
-
-### 4.2 Kafka mapping (JD + forum questions)
-
-**Topic:** `campaign.launch.v1`  
-**Key:** `tenantId:campaignId`  
-**Consumer group:** `send-workers`  
-**Commit:** after `delivery_attempt` row inserted (idempotent)
-
-**At-least-once:**
-
-```
-retry from broker → same message → ON CONFLICT DO NOTHING on attempt_id → no second ESP call
+```sql
+CREATE TABLE payment_intent (
+  tenant_id         TEXT NOT NULL,
+  payment_id        TEXT NOT NULL,
+  idempotency_key   TEXT NOT NULL,
+  order_line_ref    TEXT NOT NULL,
+  status            TEXT NOT NULL,  -- CREATED, CAPTURED, FAILED
+  PRIMARY KEY (tenant_id, payment_id),
+  UNIQUE (tenant_id, idempotency_key)
+);
 ```
 
-**At-most-once (wrong for sends):**
+Retry from partner or worker → same key → return existing `CAPTURED` row—**never** second charge for same line.
 
+Ledger-style append (if finance required):
+
+```sql
+UNIQUE (tenant_id, attempt_id, entry_type)  -- RESERVE, COMMIT, RELEASE
 ```
-commit offset before work → crash → message lost
-```
 
-**Exactly-once myth:** Network cannot guarantee; **at-least-once + idempotent effect** = indistinguishable for business.
-
-### 4.3 Outbox vs Kafka transactions
-
-| Mechanism | Solves |
-|-----------|--------|
-| Outbox + relay | DB commit aligned with publish |
-| Kafka EOS (transactional producer) | Atomic write across Kafka partitions + offsets **inside Kafka app**—not your Postgres row |
-
-Payments interview answer: **outbox** is industry standard for DB + Kafka.
-
-### 4.4 Ordering
-
-- Per **VIN**: partition by `vin` → `AVAILABLE` then `SOLD` processed in order.
-- Handle out-of-order: store `version` or `event_time`; ignore stale `AVAILABLE` after `SOLD`.
-
-### 4.5 Debug: producer OK, consumer silent (Tekion Mar 2026)
-
-Checklist:
-
-1. Consumer `group.id` matches deployment?
-2. Subscribed topic name / cluster?
-3. Stuck on one offset (poison pill loop)?
-4. Partition assignment—all partitions have live consumer?
-5. `max.poll.interval` exceeded processing huge batch?
-6. ACL / SASL on consumer only?
+Same pattern you would describe for co-op spend at Tekion; **your proof** is PaymentMs + bulk line reference.
 
 ---
 
-## 5. Indexing and sharding (food delivery LLD follow-up)
+## 4. Enrollment state (P5) — optimistic version
 
-Tekion asked: **which tables to index/shard?**
+```sql
+UPDATE enrollment
+SET status = 'ACTIVE', version = version + 1
+WHERE tenant_id = $1 AND enrollment_id = $2
+  AND status = 'CREDIT_APPROVED' AND version = $3;
+```
 
-**Postgres:**
-
-- `order(restaurant_id, status, created_at)` index for kitchen queue
-- `booking(slot_id)` unique where status confirmed
-- Shard by `city_id` or `tenant_id` when single DB saturates
-
-**Never shard by low-cardinality `status` alone.**
-
----
-
-## 6. OpenSearch / Elasticsearch role
-
-- **Not** transactional store.
-- Creative search, log RCA (your SRE service), operational explore.
-- Send path uses Postgres snapshot + approved `template_id`.
+0 rows → concurrent rep and automated job conflict → 409 to client.
 
 ---
 
-## 7. Study drill
+## 5. Caching (P3 ConfigMs + catalog reads)
 
-Write SQL + one Kafka message for:
+### Config / product rules cache
 
-1. Launch accepted → outbox → chunk published.
-2. Duplicate chunk delivery.
-3. Reserve budget fails mid-chunk.
+**Problem:** ConfigMs read on every cart validation (**P4**).
 
-Answers in [04-api-and-system-design.md](./04-api-and-system-design.md).
+```
+key: config:v1:{tenantId}:{productOfferId}
+TTL: 120s
+invalidate: on config publish event from admin tool
+```
+
+### Thundering herd on hot offer
+
+During promotion, 50 workers miss cache → 50 ConfigMs DB hits.
+
+**Singleflight** with Redis `SET lock:config:... NX EX 5`—same pattern you’d use on any hot catalog key.
+
+### What we did **not** cache as sole source of truth
+
+- Payment status (**P3**)
+- Final enrollment activation (**P5**)
+- Batch acceptance record (**P2**)
+
+Redis eviction must not create a “free” duplicate payment.
+
+---
+
+## 6. Event-driven (P2 RabbitMQ — your production path)
+
+| Step | Bulk engine |
+|------|-------------|
+| 1 | API stores `bulk_batch` + outbox |
+| 2 | Relay publishes to `bulk.order.lines` |
+| 3 | Consumer idempotent on `(batch_id, line_id)` |
+| 4 | Poison → DLQ; ops replay after fix |
+| 5 | Metric: lines accepted − lines terminal = **dropout** |
+
+### Mapping to Kafka (JD / Tekion question — honest)
+
+> “I did not operate Kafka for this path; I operated **RabbitMQ** with the same rules: **at-least-once delivery**, **idempotent consumer**, **DLQ**, lag/depth alerts. Partition key would be `tenant_id:batch_id` if we moved to Kafka.”
+
+### Outbox
+
+Batch row + outbox row in **one transaction**—the fix we applied when reviewing dual-write on ordering services.
+
+### Ordering
+
+If line 2 depends on line 1 (rare in bulk)—use same routing key / single consumer for that batch; otherwise lines are independent (**why one bad line did not fail 9,999 others**).
+
+---
+
+## 7. OpenSearch (P10) — not transactional
+
+SRE Triaging queries logs by `traceId`, time, service name.
+
+**Not used for:** deciding if payment captured or enrollment active.
+
+Index is **evidence** for LangGraph nodes; domain state stays in Postgres / Cassandra.
+
+---
+
+## 8. Indexing / sharding (Tekion LLD follow-up — answer from P1/P2)
+
+**Which tables to index?**
+
+- `batch_line_status (tenant_id, batch_id, status)` for ops dashboard
+- `payment_intent (tenant_id, order_line_ref)` for support lookup
+- Cassandra: primary key is the index—design query first
+
+**Shard when:** single Cassandra/Postgres node saturates on **tenant_id** write rate—split by tenant shard or move batch headers to dedicated store.
+
+---
+
+## 9. Drill
+
+Write from memory:
+
+1. Accept `bat_9001` with idempotency key (SQL + outbox).
+2. Duplicate Rabbit message for `line_0042`.
+3. Credit timeout on line 99 only—batch continues.
+
+Answers are in [04-api-and-system-design.md](./04-api-and-system-design.md) Part B.

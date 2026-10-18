@@ -11,7 +11,7 @@ For each question:
 1. **Clarify** (30–60 seconds).
 2. **State NFRs with numbers**.
 3. **Draw one design** (don’t list every alternative—SSE reject lesson).
-4. **Anchor to your work** (ordering, bulk engine, Agentic Universe).
+4. **Anchor to a project ID (P1–P12)** — see [11-your-projects-catalog.md](./11-your-projects-catalog.md). Never answer with a fictional campaign service.
 
 ---
 
@@ -40,22 +40,19 @@ See checklist in [05-databases-events-caching.md](./05-databases-events-caching.
 
 ### Q: Retries must not deduct balance twice (SDE-2 Bangalore, Mar 2026)
 
+Answer with **P3 PaymentMs** + **P2** line worker:
+
 ```sql
-UNIQUE (tenant_id, idempotency_key)
--- or UNIQUE (tenant_id, attempt_id, entry_type) for ledger
+UNIQUE (tenant_id, idempotency_key)  -- payment_intent
 ```
 
-State machine: `CREATED → CAPTURED`. Retry returns stored outcome.
+State: `CREATED → CAPTURED`. Retry with same key returns same row—no second capture for that order line.
 
-**Outbox:** payment row + outbox in one TX; relay to `payments.events`.
+Optional: payment row + outbox in one TX (**P2** pattern) if you emitted payment events.
 
 ### Q: Payment success, inventory/notification fails (Senior onsite, Apr 2026)
 
-- Payment `CAPTURED` (immutable).
-- Inventory failure → `FULFILLMENT_FAILED` + compensating refund saga or manual queue.
-- Do not delete payment row.
-
-Map to: ESP accepted send, ledger commit fails → reconciliation job.
+**P2 + P3:** Payment `CAPTURED` for line N; order domain or PEGA fails → line `FAILED`, other lines continue; refund/compensation workflow—never delete `CAPTURED` row.
 
 ---
 
@@ -63,14 +60,12 @@ Map to: ESP accepted send, ledger commit fails → reconciliation job.
 
 ### Food delivery / Swiggy (Chennai SDE-2 selected, Jun 2026)
 
-**Services:** user, restaurant, menu, order, payment, dispatch.
+After clarifying, anchor to **P2** bulk batch + **P3** PaymentMs:
 
-**Edge cases they asked:**
+- “Order placed, restaurant closes” → line/batch item invalid mid-flight; worker marks line failed; payment saga (**P3**).
+- Payment idempotency → PaymentMs keys on bulk line reference.
 
-- Order placed, restaurant closes → cancel + refund path.
-- Payment edge cases → idempotency + state machine.
-
-**Your mapping:** launch running, campaign paused, suppress chunks.
+Optional one-line Tekion analogy only after you finish the Verizon design.
 
 ### Car service-center booking (Senior SWE, rejected on HLD, Jul 2026)
 

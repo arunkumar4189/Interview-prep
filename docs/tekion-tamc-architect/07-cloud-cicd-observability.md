@@ -1,204 +1,123 @@
 # Cloud-native deployment, CI/CD, and observability (detailed)
 
-Mapped to your stack: **AWS (EKS, EC2, S3), Docker, Jenkins, GitLab CI, Grafana, New Relic**, plus edge **Akamai / APIGEE / 42Crunch**.
+**Examples from:** B2B ordering on **EKS** (**P1/P2**), **Jenkins / GitLab CI**, **New Relic** dropout (**P1**), **Grafana**, edge **APIGEE/Akamai/42Crunch** (**P8**), **SRE Triaging** log correlation (**P10**).
+
+Catalog: [11-your-projects-catalog.md](./11-your-projects-catalog.md).
 
 ---
 
-## 1. Container image
+## 1. Container image (bulk batch or domain API)
 
 ```dockerfile
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
-COPY target/campaign-api.jar app.jar
+COPY target/bulk-batch-api.jar app.jar
 USER nonroot
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
 ```
 
-**Practices:**
-
-- One process per container.
-- Config via env (`SPRING_DATASOURCE_URL`), secrets from K8s Secret / AWS Secrets Manager—not baked into image.
-- Tag image with **git SHA**, not `latest` only.
+Config: `SPRING_DATA_CASSANDRA_CONTACT_POINTS`, Rabbit URI, New Relic license via env/secret—not in image.
 
 ---
 
-## 2. Kubernetes (EKS) deployment sketch
+## 2. Kubernetes (EKS) — names from your platform
 
-### API deployment
+| Deployment | Project | Notes |
+|------------|---------|-------|
+| `cxp-graphql` / order aggregate | **P1** | Readiness includes Cassandra |
+| `bulk-batch-api` | **P2** | maxUnavailable 0 on rollouts |
+| `bulk-line-worker` | **P2** | No Ingress; consumes Rabbit |
+| `sre-triaging-api` | **P10** | OpenSearch client timeouts |
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: campaign-api
-spec:
-  replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
-  template:
-    spec:
-      containers:
-        - name: api
-          image: 123456789.dkr.ecr.ap-south-1.amazonaws.com/campaign-api:abc123
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "1Gi"
-            limits:
-              memory: "2Gi"
-          readinessProbe:
-            httpGet:
-              path: /actuator/health/readiness
-              port: 8080
-            periodSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /actuator/health/liveness
-              port: 8080
-            periodSeconds: 30
-```
+**Worker graceful shutdown:** on SIGTERM, stop consuming, finish current **line** or chunk, ack message, exit—`terminationGracePeriodSeconds` 60+.
 
-### Worker deployment
-
-- **No Ingress**—workers only consume Kafka/RabbitMQ.
-- **Graceful shutdown:** on `SIGTERM`, stop polling, finish current chunk, commit offset, exit (30–60s `terminationGracePeriodSeconds`).
-
-### HPA
-
-- API: CPU or request rate.
-- Workers: **custom metric** `kafka_consumer_lag` or queue depth—not CPU alone.
-
-### PDB
-
-```yaml
-minAvailable: 1
-```
-
-So node drain doesn’t take all API pods.
+**HPA:** scale **bulk-line-worker** on Rabbit queue depth / consumer lag, not CPU alone.
 
 ---
 
-## 3. Probes — incident story to tell
+## 3. Probes (lesson from production reviews)
 
-**Bad:** Liveness probe calls Postgres. DB blip → all pods restart → thundering herd → outage.
-
-**Good:**
-
-- **Readiness:** can reach DB + broker (remove from Service endpoints if not).
-- **Liveness:** JVM responsive / thread pool not deadlocked—**not** full dependency chain.
+- **Readiness:** can reach Cassandra + Rabbit (**P2**).
+- **Liveness:** JVM responsive—**do not** ping Cassandra on liveness (DB blip restarted all workers → backlog spike).
 
 ---
 
-## 4. CI/CD pipeline (GitLab CI or Jenkins)
+## 4. CI/CD (Jenkins / GitLab CI)
 
 ```text
-stage: build
-  - mvn -B verify (unit + integration with Testcontainers)
-
-stage: image
-  - docker build & push to ECR
-
-stage: deploy-staging
-  - helm upgrade --install campaign-api ./chart -f values-staging.yaml
-  - smoke: POST /v1/campaigns/.../launches with test idempotency key → expect 202
-
-stage: deploy-prod
-  - manual approval OR progressive: 10% → 50% → 100%
-  - DB migration job runs BEFORE new pods take traffic (additive migrations only)
+mvn verify + Testcontainers (Cassandra or Postgres for Agentic tests)
+→ docker build → push ECR
+→ deploy staging
+→ smoke: POST bulk-batches test idempotency key → 202
+→ prod progressive rollout
 ```
 
-**Additive migration example:**
-
-```sql
-ALTER TABLE launch ADD COLUMN suppress_version INT NOT NULL DEFAULT 0;
-```
-
-Old code ignores column; new code uses it.
+Migrations: additive columns on `bulk_batch` / `agent_run` (**P9**) before traffic shift.
 
 ---
 
 ## 5. Observability
 
-### 5.1 Structured logging
+### 5.1 Structured logs (bulk line)
 
 ```json
 {
-  "timestamp": "...",
-  "level": "INFO",
-  "tenantId": "acme",
-  "campaignId": "cmp_44",
-  "launchId": "ln_100",
-  "attemptId": "att_9f2",
-  "message": "esp_send_ok",
-  "durationMs": 142
+  "tenantId": "b2b-smb",
+  "batchId": "bat_9001",
+  "lineId": "line_0042",
+  "orderId": "ord_771",
+  "traceId": "abc123",
+  "message": "line_processing_complete",
+  "durationMs": 210
 }
 ```
 
-**Never** log full phone/email body in prod.
+No full cart PII in log line—board rule from **P8/P12**.
 
-### 5.2 Metrics (Prometheus / New Relic)
+### 5.2 Metrics
 
-| Metric | Type |
-|--------|------|
-| `launch_accept_total` | counter |
-| `launch_dropout` | gauge (accepted - terminal) |
-| `esp_request_duration_seconds` | histogram |
-| `consumer_lag_seconds` | gauge |
-| `budget_reserve_conflict_total` | counter |
+| Metric | Source |
+|--------|--------|
+| Order/batch dropout | **New Relic** custom metric (**P1**) |
+| Rabbit queue depth | Broker / Grafana |
+| PEGA/credit timeout rate | Adapter metric |
+| GraphQL p99 | **P1** aggregate |
 
 ### 5.3 Tracing
 
-- Inject `traceparent` at API.
-- Outbox relay copies trace context to message headers.
-- Worker continues span on consume.
+`traceId` from APIGEE (**P8**) through bulk API → worker → order domain—support used this for “line stuck.”
 
-### 5.4 Alerts (business-first)
+### 5.4 SRE Triaging (P10)
 
-1. Dropout > 0 for 5 min (P1)
-2. Consumer lag > drain SLO (P2)
-3. ESP error rate > 5% (P2)
-4. VIN suppress lag p99 > 30s (P1 for automotive)
+LangGraph node queries **OpenSearch** by `traceId` + time window—**read-only evidence**, not control plane.
 
-Your **order dropout** story is the template.
+### 5.5 Alerts (business-first)
+
+1. Dropout > 0 for 5 minutes
+2. Bulk queue depth above SLO
+3. Credit adapter error rate > threshold during enrollment peak (**P5**)
 
 ---
 
-## 6. AWS pieces
+## 6. AWS
 
-| Service | Use in TAMC study design |
-|---------|--------------------------|
-| EKS | Run API + workers |
+| Service | Your use |
+|---------|----------|
+| EKS | Run ordering + bulk workers |
 | ECR | Images |
-| S3 | Audience export files, vendor cost reconciliation CSV |
-| RDS Postgres | Managed OLTP (if not self-hosted) |
-| Secrets Manager | ESP API keys |
-| ALB + WAF | Public ingress (or Akamai in front) |
+| S3 | Large bulk file staging if partners uploaded payload to bucket first (if applicable in your design) |
+| EC2 | Legacy or node pools |
 
 ---
 
-## 7. Edge (your APIGEE project)
+## 7. Edge (P8)
 
-- OAuth2 / JWT validation at gateway.
-- Rate limits per API key (dealer).
-- Request size limits (bulk payloads → separate upload to S3 + reference in launch).
+**APIGEE:** OAuth, quota per partner, WAF integration with Akamai.
 
-Service **re-validates** tenant claim vs resource.
+Service still validates `tenant_id` on batch against token claims—gateway does not replace authorization.
 
 ---
 
-## 8. Production operations checklist
+## 8. Interview story
 
-- Runbook: “consumer lag growing” → scale workers, check poison message, check ESP limit.
-- Feature flags: disable SMS channel without deploy.
-- Kill switch: pause all launches for tenant (support tool).
-
----
-
-## 9. Interview questions
-
-- Blue/green vs rolling? (Rolling with maxUnavailable 0 is common on EKS.)
-- How migrate DB with zero downtime? (Expand-contract pattern.)
-- What did New Relic show during last incident? (Have one real or realistic story.)
+Pick **real or realistic:** “Dropout alert fired; trace showed lines accepted at API but worker could not reach PEGA; we extended circuit breaker and cleared backlog after PEGA recovery—guardrail: DLQ depth alert.”

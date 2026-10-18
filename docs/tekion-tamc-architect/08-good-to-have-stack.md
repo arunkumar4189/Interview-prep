@@ -1,200 +1,106 @@
-# Good-to-have stack: Kafka, Redis, Elasticsearch, MongoDB, Aerospike (detailed)
+# Good-to-have stack (detailed) — tied to your projects
 
-Honest baseline: **RabbitMQ, Redis, Cassandra, Postgres, OpenSearch** on your resume. **Kafka, MongoDB, Aerospike**—study patterns + say what you have not operated.
+| Tech | Your production/study anchor |
+|------|------------------------------|
+| RabbitMQ | **P2** bulk lines (primary event bus you operated) |
+| Kafka | Same patterns as **P2**; say you’d migrate partition key `tenant:batchId` |
+| Redis | **P3** ConfigMs / hot catalog (**resume lists Redis**) |
+| Cassandra | **P1** order + batch line tables |
+| Postgres | **P9** Agentic Universe runs + approvals |
+| OpenSearch | **P10** SRE log correlation |
+| MongoDB | Not on resume—optional journey doc; skip unless asked |
+| Aerospike | Not operated—compare to **Cassandra** read path + atomic counter need |
 
----
-
-## 1. Kafka
-
-### 1.1 Components (Tekion asked explicitly, Mar 2026)
-
-| Term | Role |
-|------|------|
-| Topic | Named log |
-| Partition | Ordered sub-log; parallelism unit |
-| Offset | Consumer position in partition |
-| Producer | Appends records |
-| Broker | Stores partitions |
-| Consumer group | One consumer per partition max (in group) |
-| Replication factor | Durability across brokers |
-| ISR | In-sync replicas eligible for leader |
-
-### 1.2 Producer settings (interview)
-
-- `acks=all` — wait for ISR ack
-- `enable.idempotence=true` — dedupe producer retries **to partition**
-- **Does not** dedupe at ESP or email recipient
-
-### 1.3 Consumer
-
-```properties
-spring.kafka.consumer.enable-auto-commit=false
-```
-
-Commit **after** idempotent DB write.
-
-### 1.4 Topic design for campaign
-
-```
-topic: campaign.launch.v1
-partitions: 48 (scale workers)
-key: tenantId + ":" + campaignId
-value: { eventId, launchId, chunkIndex, recipientIds[] }
-```
-
-DLQ: `campaign.launch.v1.dlq`
-
-### 1.5 At-least-once vs at-most-once (HM round, Kashish Medium)
-
-| Mode | Commit order | Risk |
-|------|--------------|------|
-| At-most-once | Before process | Lost messages |
-| At-least-once | After process | Duplicates (fix with idempotency) |
-
-### 1.6 Debug consumer not consuming
-
-See checklist in [05-databases-events-caching.md](./05-databases-events-caching.md).
-
-### 1.7 Your bridge sentence
-
-> I ran fan-out and idempotent consumers on **RabbitMQ** for 10k-line batches. On Kafka I’d use the same business keys and outbox relay; I’d operate lag and DLQ the same way I operated queue depth and DLQ.
+Catalog: [11-your-projects-catalog.md](./11-your-projects-catalog.md).
 
 ---
 
-## 2. Redis
+## 1. Kafka (JD) — speak from RabbitMQ (P2)
 
-### 2.1 Use cases in TAMC
+### Components
 
-| Pattern | Structure |
-|---------|-----------|
-| Campaign config cache | String JSON, TTL 60s |
-| Live VIN set per rooftop | SET `vins:{tenant}:{rooftop}` |
-| ESP rate limit | ZSET sliding window + Lua |
-| Singleflight lock | `SET lockKey NX EX 5` |
-| Delay retry queue | ZSET score = next_attempt_epoch |
+Topic, partition, offset, consumer group, ISR—see prior guide.
 
-### 2.2 Sliding window rate limit (50 req/s)
+### Your mapping
 
-Lua (atomic):
-
-```lua
--- KEYS[1] = rate:{tenant}:{channel}
-local now = tonumber(ARGV[1])
-local window = 1000 -- ms
-local limit = 50
-redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - window)
-local n = redis.call('ZCARD', KEYS[1])
-if n >= limit then return 0 end
-redis.call('ZADD', KEYS[1], now, ARGV[2])
-redis.call('PEXPIRE', KEYS[1], 2000)
-return 1
+```
+exchange/queue: bulk.order.lines  →  topic: bulk.order.line.v1
+routing key: tenant.batch         →  key: tenantId:batchId
+consumer ack after line durable   →  commit offset after (batch_id,line_id) write
+DLQ queue                         →  DLQ topic
 ```
 
-### 2.3 Why Redis is not the primary DB (Tekion parking-lot round)
+### Debug “producer OK, consumer silent”
 
-- No multi-row ACID for ledger.
-- Eviction / restart can drop data.
-- Use as **cache / rate limit / rebuildable projection**.
+Wrong vhost/queue, poison message, prefetch stuck, no consumers bound—same mental model you used on **Rabbit** during incidents.
+
+### At-least-once (Tekion HM)
+
+Commit/ack **after** idempotent Cassandra/DB write for the line.
 
 ---
 
-## 3. Elasticsearch / OpenSearch
+## 2. Redis (P3 ConfigMs)
 
-### 3.1 Your production use
+### Catalog cache
 
-**SRE Triaging Service:** query logs by `traceId`, time range, service—feed LangGraph node.
-
-### 3.2 TAMC use
-
-- **Creative library search** (full text)
-- **Audience explore** (complex filters)—index built from CRM export, not live send path
-
-### 3.3 Index design sketch
-
-```json
-PUT creatives_v1/_doc/cr_1
-{
-  "tenantId": "acme",
-  "campaignId": "cmp_44",
-  "channel": "email",
-  "body": "...",
-  "approvalStatus": "APPROVED",
-  "updatedAt": "2026-10-18T12:00:00Z"
-}
+```
+config:v1:{tenant}:{offerId}  TTL 120s
+invalidate on config publish
 ```
 
-Query: `bool must: [term tenantId, match body]`
+### Rate limit (if downstream order system throttled during bulk)
 
-### 3.4 Pitfall
+Sliding window Lua on `rate:{tenant}:order-submit`—protect **order domain** when **P2** spikes.
 
-Search index is **eventually consistent** (~1s refresh). Approved creative for send comes from **Postgres `template_id`**, not search hit.
+### Not primary store for
+
+Payment intent (**P3**), batch header (**P2**), agent approval (**P9**).
+
+---
+
+## 3. OpenSearch / Elasticsearch (P10)
+
+Index: application logs with `traceId`, `batchId`, `lineId` fields (if you added them in logging spec).
+
+SRE Triaging node: query last 30m errors for trace—feeds LangGraph, does not update orders.
+
+**Creative/audience search at Tekion:** “I have not built that; I built **log evidence retrieval** for RCA with the same index technology.”
 
 ---
 
 ## 4. MongoDB
 
-Not on your resume. One **credible** use:
+If pressed: **journey-style JSON** is weaker on your resume than **PEGA case + CJCM (P6)** and **Agentic workflow JSON in Postgres (P9)**. Prefer:
 
-**Journey definition** (nested steps, branches) while product changes shape weekly.
-
-```json
-{
-  "_id": "j_19",
-  "tenantId": "acme",
-  "version": 4,
-  "steps": [
-    { "id": "s1", "type": "email", "templateId": "t_9" },
-    { "id": "s2", "type": "wait", "hours": 48 },
-    { "id": "s3", "type": "sms", "when": "opened s1" }
-  ]
-}
-```
-
-**Running instance** of journey for a consumer → still **Postgres** (`journey_run` with state, current_step).
-
-Money, consent, ledger → Postgres.
+> “Long-running workflow and approval state for agents is in **Postgres on Agentic Universe**; case pause/resume was **PEGA + CJCM** on ordering.”
 
 ---
 
-## 5. Aerospike
+## 5. Aerospike (JD)
 
-Not operated by you. JD calls it out for **low-latency profile + caps**.
+Honest:
 
-### 5.1 Access pattern
+> “I have not run Aerospike. On ordering we used **Cassandra** for high-cardinality key access by tenant/batch. A profile/frequency-cap workload would need atomic increment—I’d evaluate Aerospike or Redis with Lua; **consent and payment stay in Postgres/Cassandra** as system of record.”
 
-- Key: `tenant:consumerId`
-- Bins: `consentEmail`, `consentSms`, `capEmail`, `capSms`, `windowStart`
-- **Generation** for optimistic concurrency:
-
-```
-read record (gen=17)
-if capEmail < limit:
-  write with gen check
-else reject
-on gen conflict: re-read
-```
-
-### 5.2 vs Redis vs Postgres for caps
-
-| Store | Caps |
-|-------|------|
-| Postgres | Correct, slow at billions of reads |
-| Redis | Fast; risky if only copy of daily cap |
-| Aerospike | Fast + large cardinality + atomic gen check |
-
-Postgres remains **audit**; Aerospike is **decision cache** refreshed from events.
+Tie to **P5** fail-closed gates, not marketing caps you never built.
 
 ---
 
-## 6. Comparison table (quick revision)
+## 6. AI integration (P9 + P10)
 
-| Tech | You | TAMC role |
-|------|-----|-----------|
-| RabbitMQ | Prod bulk engine | Same patterns as Kafka |
-| Kafka | Study + forum Q | Launch pipeline |
-| Redis | Resume | Rate limit, config, VIN set |
-| Cassandra | Prod orders | Historical sends by tenant key? |
-| Postgres | Agentic + ledger | Campaign, consent, money |
-| OpenSearch | SRE logs | Logs + search |
-| Mongo | Study only | Journey defs optional |
-| Aerospike | Study only | Profile/cap hot path |
+| Path | Project | Latency |
+|------|---------|---------|
+| Multi-step RCA | **P10** LangGraph | Minutes; human reads output |
+| Hosted agents | **P9** Agentic Universe | Async; **AWAITING_APPROVAL** |
+| Inline on order create | **We did not** put LLM on **P1** submit path | Credit/OCR are bounded adapters |
+
+**ScoringPort / CreativePort** in Java are the same boundary you already have with **CreditCheckPort** and **PegaCasePort**.
+
+---
+
+## 7. Kubernetes + AWS
+
+**EKS + Docker + Jenkins/GitLab** from resume—deploy **bulk-batch-api** and **bulk-line-worker** (**P2**), not fictional campaign services.
+
+See [07-cloud-cicd-observability.md](./07-cloud-cicd-observability.md).

@@ -1,236 +1,224 @@
 # API design and backend system design (detailed)
 
+**All examples:** bulk order engine (**P2**), async cart validation (**P4**), GraphQL CXP aggregate (**P1**), internal API libraries (**P7**), PaymentMs (**P3**).
+
+Catalog: [11-your-projects-catalog.md](./11-your-projects-catalog.md).
+
 ---
 
-## Part A — API design
+## Part A — API design from your platforms
 
-### 1. REST conventions for TAMC
+### 1. Resources you actually exposed
 
-**Resources (nouns):**
+| API surface | Project | Example paths |
+|-------------|---------|----------------|
+| Bulk batch | **P2** | `POST /v1/bulk-batches`, `GET /v1/bulk-batches/{batchId}` |
+| Cart | **P3/P4** | `POST /v1/carts/{cartId}/validate` (async), `GET .../validation-status` |
+| Enrollment | **P5** | `POST /v1/enrollments`, `GET /v1/enrollments/{id}` |
+| Case pause/resume | **P6** | `POST /v1/cases/{caseId}/pause`, `.../resume` |
+| GraphQL | **P1** | Single CXP schema composing domain fields |
 
-- `/v1/campaigns/{campaignId}`
-- `/v1/campaigns/{campaignId}/launches`
-- `/v1/launches/{launchId}`
-- `/v1/audience-snapshots/{snapshotId}`
-- `/v1/audience-snapshots/{snapshotId}/members`
+Internal **published libraries** (**P7**) wrapped these contracts so other Verizon teams did not fork DTOs.
 
-**Verbs via HTTP methods:**
+### 2. Idempotency — bulk batch (P2)
 
-- `POST` create launch (non-idempotent without key)
-- `GET` read status
-- `PATCH` pause/resume campaign (state transition)
-
-### 2. Idempotency (required on money and launch)
-
-**Client generates** `Idempotency-Key` (UUID) and sends on **every retry** of the same logical operation.
-
-Server:
-
-```sql
-UNIQUE (tenant_id, idempotency_key)
-```
-
-On conflict: return **same** `202` body as first success (don't create second launch).
-
-**Why server-generated keys fail:** Retry after timeout gets a new key → double launch.
-
-### 3. Example: launch API
+Partner retries upload after gateway timeout.
 
 ```http
-POST /v1/campaigns/cmp_44/launches
+POST /v1/bulk-batches
 Authorization: Bearer …
-Idempotency-Key: 6f1c0e2a-1b4d-4e0a-9c33-0a9e2f7b11d4
+Idempotency-Key: 7a2b9c10-4e5f-6a7b-8c9d-0e1f2a3b4c5d
 Content-Type: application/json
 
-{
-  "audienceSnapshotId": "snap_8821",
-  "channels": ["email", "sms"]
-}
+{ "partnerId": "prt_88", "lines": [ /* 10k+ order lines */ ] }
 ```
 
 ```http
 HTTP/1.1 202 Accepted
-Content-Type: application/json
 
 {
-  "launchId": "ln_100",
+  "batchId": "bat_9001",
   "status": "ACCEPTED",
-  "statusUrl": "/v1/launches/ln_100"
+  "statusUrl": "/v1/bulk-batches/bat_9001"
 }
 ```
 
-Status poll:
+Poll:
 
 ```json
 {
-  "launchId": "ln_100",
-  "status": "RUNNING",
-  "accepted": 200000,
-  "sent": 84110,
-  "failed": 120,
-  "suppressed": 902
+  "batchId": "bat_9001",
+  "status": "PROCESSING",
+  "linesAccepted": 10240,
+  "linesCompleted": 6102,
+  "linesFailed": 14
 }
 ```
 
-### 4. Pagination (audience snapshot members)
+**DB:** `UNIQUE (tenant_id, idempotency_key)` on `bulk_batch`.
 
-**Do not** use `OFFSET` on large snapshots—rows shift, pages skip/duplicate.
+### 3. Async cart validation (P4)
 
-**Cursor:**
+Large B2B cart cannot block servlet/reactive thread for minutes.
 
 ```http
-GET /v1/audience-snapshots/snap_8821/members?limit=500&cursor=eyJpZCI6Ijg0MTEifQ
+POST /v1/carts/cart_771/validations
+→ 202 { "validationJobId": "val_12", "status": "QUEUED" }
+
+GET /v1/carts/cart_771/validations/val_12
+→ 200 { "status": "COMPLETED", "errors": [...] }
 ```
 
-Cursor encodes last `member_id` in stable sort order `(snapshot_id, member_id)`.
+Same pattern as batch accept: **acknowledge work**, persist job id, process off-thread.
 
-### 5. Errors (RFC 7807 problem+json)
+### 4. GraphQL aggregate (P1) — API composition
 
-```json
-{
-  "type": "https://api.tekion.example/problems/launch-conflict",
-  "title": "Campaign is paused",
-  "status": 409,
-  "detail": "Campaign cmp_44 is PAUSED; resume before launch.",
-  "tenantId": "acme",
-  "campaignId": "cmp_44"
+Client one round-trip:
+
+```graphql
+mutation submitEnrollment($input: EnrollmentInput!) {
+  submitEnrollment(input: $input) {
+    enrollmentId
+    status
+    caseId   # CJCM / PEGA case when applicable
+  }
 }
 ```
 
-Clients branch on `type`, not English `detail`.
+Resolver fans out to **domain services** with per-call timeouts—not one monolith stored procedure.
 
-| Code | Use |
-|------|-----|
-| 400 | Malformed JSON, unknown channel |
-| 404 | Unknown campaign/snapshot |
-| 409 | Illegal state transition |
-| 422 | Snapshot expired / not approved |
-| 429 | Tenant rate limit |
-| 503 | Dependency down; retry with same idempotency key |
+### 5. Errors (libraries other teams relied on — P7)
 
-### 6. Versioning
+```json
+{
+  "type": "https://api.verizon.example/problems/case-paused",
+  "title": "Case is paused",
+  "status": 409,
+  "detail": "Case case_441 is PAUSED; resume before submitting add-a-line.",
+  "tenantId": "b2b-smb",
+  "caseId": "case_441"
+}
+```
 
-- **Additive:** new optional JSON fields on `202` response—stay on `/v1`.
-- **Breaking:** remove enum value, rename field → `/v2` + deprecation header.
+| Code | Your use |
+|------|----------|
+| 409 | Illegal transition (paused case, batch already completed) |
+| 422 | Cart line fails business validation |
+| 503 | Credit/PEGA down—retry with **same** Idempotency-Key |
 
-Your **internal API libraries** at Verizon succeeded because error codes and resource names were stable—same discipline here.
+### 6. Pagination
+
+For batch line status export: **cursor** on `(batch_id, line_id)`, not OFFSET across 10k+ rows.
 
 ---
 
-## Part B — System design: campaign launch (full walkthrough)
+## Part B — System design walkthrough: bulk order engine (P2) — what you built
 
-### Step 0 — Clarify (2 minutes)
+Use this when they say “design a high-throughput backend workflow.” It **is** your answer.
 
-Ask:
+### Step 0 — Clarify (state numbers)
 
-- Recipients per launch? (200k study number)
-- Channels? Email + SMS
-- ESP rate limit? (50 req/s)
-- Consent requirements? Fail-closed
-- Sold VIN during send? Must suppress within 30s
+| NFR | Your platform (study talking points) |
+|-----|--------------------------------------|
+| Lines per payload | **10,000+** (resume) |
+| Accept API p99 | Low—only persist header + outbox |
+| Platform availability | **99.99%** on mission-critical B2B ordering (**P1**) |
+| Duplicate line processing | **0** (unique `batch_id + line_id`) |
+| Silent loss | **0**—**order dropout** metric in New Relic |
 
-**State NFRs (Tekion rejects “no numbers”):**
-
-| NFR | Target |
-|-----|--------|
-| Accept API p99 | < 200 ms |
-| Accept availability | 99.9% |
-| Complete 200k sends | 15 min (≈222/s average; burst limited by ESP) |
-| Double-send rate | 0 |
-| VIN suppress p99 | < 30 s after `SOLD` event |
-
-### Step 1 — High-level diagram
+### Step 1 — Diagram (say this out loud)
 
 ```
-[Dealer UI] → [API GW] → [Campaign Service] → Postgres (campaign, launch, outbox)
-                              │
-                              ▼
-                        [Outbox Relay] → Kafka topic campaign.launch.v1
-                              │
-                              ▼
-                        [Send Workers] → [Consent] → [Rate limit Redis]
-                              │                    → [Delivery adapters: ESP, SMS]
-                              ▼
-                        Postgres (delivery_attempt, receipt)
-                        
-[DMS feed] → [Inventory Service] → Postgres + Redis SET (live VINs)
-         → event VIN_SOLD → workers re-check before vendor call
+[B2B Partner] → [APIGEE P8] → [Bulk Batch API P2]
+                                    │
+                    Cassandra / store: batch header, outbox
+                                    │
+                                    ▼
+                          [Outbox Relay] → RabbitMQ (bulk.order.lines)
+                                    │
+                                    ▼
+                          [Line Workers + Netflix OSS edge]
+                                    │
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+        [Order domain P1]    [PaymentMs P3]      [PEGA case P6]
+              │
+              ▼
+        New Relic: accepted_lines vs completed_lines (dropout)
 ```
 
-### Step 2 — Data model (core tables)
+### Step 2 — Write path
 
-See [05-databases-events-caching.md](./05-databases-events-caching.md).
+1. **Accept** batch + outbox (transaction).
+2. Relay publishes **one message per line** (or chunk of lines if you chunked—state which you used).
+3. Consumer creates/updates order for line with idempotent key.
 
-### Step 3 — Write path (launch)
-
-Already in [02-java-spring-boot.md](./02-java-spring-boot.md)—outbox + chunk messages.
-
-**Chunk message payload:**
+**Message body (conceptual):**
 
 ```json
 {
   "eventId": "evt_uuid",
-  "tenantId": "acme",
-  "launchId": "ln_100",
-  "campaignId": "cmp_44",
-  "chunkIndex": 17,
-  "recipientIds": ["r1", "r2", ...]
+  "tenantId": "b2b-smb",
+  "batchId": "bat_9001",
+  "lineId": "line_0042",
+  "orderPayload": { ... }
 }
 ```
 
-**Partition key:** `tenantId:campaignId` (ordering per campaign).
+Routing key / queue: enough isolation that one partner’s poison line does not block all B2B traffic (partition by `tenant_id` or `batch_id`).
 
-### Step 4 — Consumer (per recipient)
+### Step 3 — Consumer logic (per line)
 
 ```text
-FOR each recipientId in chunk:
-  IF NOT consent_ok(tenant, recipient, channel): SKIP
-  IF capped(tenant, recipient, channel): SKIP
-  IF campaign_uses_vin AND vin NOT IN live_set: SKIP
-  attempt_id = hash(launchId, recipientId, channel)
-  INSERT delivery_attempt ... ON CONFLICT DO NOTHING
-  IF inserted:
-      CALL esp.send(..., idempotencyKey=attempt_id)
-      UPDATE attempt status SENT / FAILED
+INSERT processing_attempt (batch_id, line_id) ON CONFLICT DO NOTHING
+IF inserted:
+    CALL order domain create/update
+    IF payment required → PaymentMs with idempotency key derived from line
+    IF case needed → PEGA adapter (P6)
+    MARK line COMPLETED or FAILED with reason
+ELSE
+    skip duplicate delivery
 ```
 
-### Step 5 — Read path (dealer dashboard)
+### Step 4 — Failure modes you operated
 
-Materialized counters in Postgres or Redis updated by receipt events—not `COUNT(*)` on 200M row table per page load.
+| Failure | What we did |
+|---------|-------------|
+| Rabbit redelivery | Idempotent line key |
+| Credit timeout on one enrollment line in batch | Line FAILED; others continue (**P5** rule on single line) |
+| PEGA pause | **P6**—case paused, worker stops new work on that case id |
+| Partner thinks batch lost | Idempotency key returns same `batchId` |
 
-### Step 6 — Deep dives interviewers ask
+### Step 5 — Tekion forum parallels (answer using P2)
 
-**Pause campaign mid-flight:**
+| Their prompt | Your answer |
+|--------------|-------------|
+| Food delivery / payment edge cases | **PaymentMs** idempotency + line FAILED without failing whole batch |
+| Payment success, later step fails | Payment captured on line; order fulfillment failed → compensating workflow / manual queue |
+| Kafka consumer stuck | Same debug story on **Rabbit** queue depth + DLQ |
 
-- Set campaign `PAUSED`.
-- Workers check status at chunk start; in-flight chunk may complete—product decision.
-- New chunks not published.
+### Step 6 — What we gave up
 
-**Restaurant closes after order (Tekion food delivery):**
-
-- Order state `ACCEPTED` → if restaurant closes → `CANCELLED` + refund saga.
-- **Parallel:** launch `RUNNING` → campaign `PAUSED` + suppress new chunks.
-
-**Payment succeeded, inventory failed (Tekion senior):**
-
-- Payment row `CAPTURED`; inventory reservation failed → `NEEDS_REFUND` event; finance job; never double-charge on retry.
-
-### Step 7 — What you gave up
-
-- **Strong consistency** on dashboard counts (eventual by seconds).
-- **Global ordering** across tenants (only per-campaign).
-- **Synchronous LLM** on send path (creative pre-approved offline).
+- **Strong consistency** on batch progress UI (eventual line counters).
+- **Synchronous** processing of 10k lines in one HTTP request.
+- **Global ordering** across all B2B tenants (only ordering inside one batch if required).
 
 ---
 
-## Part C — Map to your bulk engine
+## Part C — Second system design: North Star enrollment path (P1 + P5)
 
-| Bulk order engine | Campaign launch |
-|-------------------|-----------------|
-| Batch accept | Launch accept |
-| Line message | Chunk message |
-| `batch_id + line_id` unique | `launch_id + recipient_id + channel` unique |
-| RabbitMQ | Kafka (in JD) |
-| Dropout metric | `accepted - terminal` launches |
+Shorter HLD if they want “customer journey” not bulk:
 
-Say this mapping in one minute—it proves distributed systems experience without claiming fake Kafka ops history.
+1. GraphQL **CXP** mutation.
+2. Domain enrollment service persists.
+3. Parallel adapters: OCR ScanID, adaptive auth, credit—with budgets.
+4. CJCM opens **PEGA** case; pause/resume on rep workflow.
+5. Cassandra for enrollment read models; dropout on any step.
+
+This is the “workflow + adapters” design without bulk fan-out.
+
+---
+
+## Part D — One sentence if they ask automotive marketing
+
+> “I have not built TAMC; the closest live system I ran is **10k-line bulk accept with RabbitMQ and idempotent line consumers**, and **enrollment with fail-closed credit adapters**—same split between durable aggregate, async fan-out, and external ports.”

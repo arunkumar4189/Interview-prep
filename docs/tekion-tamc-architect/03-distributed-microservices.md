@@ -48,11 +48,12 @@ Is the user waiting for the result in the same HTTP request?
 | Operation | Sync/async | Why |
 |-----------|------------|-----|
 | Create campaign draft | Sync | Small DB write |
-| Launch 200k sends | Async | Minutes of work |
-| Credit check for activation | Sync with tight budget OR async | Product: fail-closed vs wait page |
-| Generate LLM email body | Async + human approve | Seconds–minutes |
-| Scoring on send decision | Sync ≤25ms | Rules fallback on timeout |
-| VIN sold suppress | Event-driven | Inventory event → suppress projection |
+| **P2** bulk 10k+ lines | Async | RabbitMQ fan-out |
+| **P4** large cart validate | Async | 202 + job |
+| **P5** credit / OCR / auth | Sync with tight budget | Fail-closed on activation |
+| **P9** agent creative step | Async + human approve | Not on order GraphQL path |
+| **P10** RCA LangGraph | Async minutes | Human reads; no auto-fix prod |
+| Catalog rule change mid-batch | Event or version check | Worker re-reads **ConfigMs** |
 
 ---
 
@@ -117,36 +118,40 @@ For each external dependency:
 
 - Tenant from token claims matches `tenant_id` in path/body.
 - Idempotency key scope per tenant.
-- Authorization: can this principal launch this campaign?
+- Authorization: can this partner submit a bulk batch for this `tenant_id`? (**P2**)
 
 Gateway is not a substitute for **row-level tenant checks** in SQL (`WHERE tenant_id = ?`).
 
 ---
 
-## 8. Microservice boundaries for TAMC (study design)
+## 8. Microservice boundaries you actually drew (P3 + P1 + P2)
 
 | Service | Owns | Does not own |
 |---------|------|--------------|
-| Campaign | Definition, approval state, schedule | Sending email |
-| Audience | Segment definition, **snapshot** materialization | CRM master (adapter) |
-| Consent | DNC, channel opt-in record | ESP template |
-| Inventory projection | Live VIN set per rooftop | DMS (adapter) |
-| Delivery orchestrator | Chunks, attempt ids, receipts | Creative text |
-| Ledger | Reserve/commit/release | Google billing file (reconcile) |
-| Scoring adapter | Model call, timeout, fallback | Campaign rules |
+| **CartMs** (P3) | Cart lines, validation trigger | Payment capture |
+| **ConfigMs** (P3) | Offers, rules, catalog reads | Order submission |
+| **PaymentMs** (P3) | Payment intent, idempotency | PEGA case state |
+| **Bulk batch API** (P2) | Batch accept, outbox | Per-line order logic |
+| **Line worker** (P2) | Consume line, idempotent processing | GraphQL schema |
+| **CXP aggregate** (P1) | GraphQL composition | Domain persistence |
+| **Domain enrollment** (P5) | Enrollment aggregate | Credit bureau SDK |
+| **CJCM / case** (P6) | Pause/resume orchestration | PEGA internals |
+| **Adapters** | PEGA, credit, OCR, legacy quote (P5/P7) | Core order tables |
 
-**Wrong boundary:** “AIService” that imports campaign entities and calls OpenAI inside `@Transactional`.
+**Wrong boundary we rejected in review:** enrollment service importing PEGA client and calling it inside one giant `@Transactional` method.
+
+**Tekion analogy (one line):** CartMs ≈ campaign definition; bulk batch ≈ launch fan-out; PaymentMs ≈ spend ledger—see [11-your-projects-catalog.md](./11-your-projects-catalog.md).
 
 ---
 
-## 9. Exercise
+## 9. Exercise (from your domain)
 
-**Prompt:** Dealer launches campaign; 5 minutes later VIN sells; ESP still has in-flight batch.
+**Prompt:** Partner bulk batch in flight; mid-batch catalog rule changes and line 500 becomes invalid.
 
-Write:
+Write using **P2/P4**:
 
-1. Events (names + keys).
-2. Where last-chance VIN check happens.
-3. Metric for suppress lag.
+1. Event or rule version on batch header.
+2. Worker re-validates line against **ConfigMs** (**P3**) before order create.
+3. Metric: invalid lines vs **dropout** (New Relic).
 
-Answer skeleton in [09-tamc-domain-scenarios.md](./09-tamc-domain-scenarios.md).
+If interviewer insists automotive: map invalid line → “suppress send” using [09-tamc-domain-scenarios.md](./09-tamc-domain-scenarios.md).

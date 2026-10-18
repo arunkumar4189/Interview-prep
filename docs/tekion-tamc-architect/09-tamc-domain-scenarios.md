@@ -1,168 +1,121 @@
-# TAMC domain scenarios and AI integration (detailed)
+# Answering automotive / TAMC questions using only your projects
 
-Automotive marketing is **not** generic email SaaS. Interviewers with Tekion product context will listen for **VIN, rooftop, OEM co-op, consent**.
+You have **not** shipped Tekion Marketing Cloud. Interviewers still ask product-shaped questions. **Answer with P1–P12 first**, then one analogy sentence.
 
----
-
-## 1. Vocabulary
-
-| Term | Meaning |
-|------|---------|
-| Dealer group | Tenant with many rooftops |
-| Rooftop | Single dealership location |
-| VIN | Vehicle identity; can sell while ad is in flight |
-| OEM co-op | Manufacturer-funded ads with strict rules |
-| DNC / consent | Legal gates (TCPA SMS/calls, email opt-in, state privacy) |
+Catalog: [11-your-projects-catalog.md](./11-your-projects-catalog.md).
 
 ---
 
-## 2. Scenario A — Campaign launch + sold VIN
+## 1. Vocabulary (listen for → map to your system)
 
-### Trigger
-
-Dealer approves email/SMS to 200,000 contacts referencing vehicles in stock.
-
-### Flow
-
-1. **Audience snapshot** frozen (`snap_8821`).
-2. **Launch accepted** (outbox → chunks).
-3. Worker for recipient **R** includes VIN `1HGCM82633A004352`.
-4. At T+5min, DMS emits `VehicleStatusChanged(VIN, SOLD)`.
-5. Inventory service updates Postgres + Redis SET remove VIN.
-6. Workers **already in flight** must call `isVinLive(vin)` **immediately before** ESP/SMS API.
-7. Suppress metric: time from event to last in-flight send blocked.
-
-### Failure if you skip step 6
-
-Cache updated but worker batch loaded old creative list → dealer advertises sold car.
-
-### Your analogy
-
-Cancelled line item must stop fulfillment—**order dropout** thinking applied to marketing.
+| They say | You answer with |
+|----------|-----------------|
+| Campaign launch | **P2** bulk batch accept + Rabbit fan-out |
+| Audience snapshot | **P4** cart frozen at validation start / batch payload immutable after accept |
+| Consent / TCPA | **P5** adaptive auth + credit fail-closed; no activation without pass |
+| Pause in flight | **P6** PEGA case pause & resume |
+| Spend / co-op budget | **P3** PaymentMs idempotency + conditional reserve |
+| Sold VIN suppress | **P4** line invalid after catalog change; **P1** dropout if fulfillment proceeds wrongly |
+| LLM creative | **P9** generate → human approve → then side effect |
+| Scoring on hot path | **P5** credit with 2s budget—not unbounded LLM |
+| Policy ALLOW/DENY | **P5** credit rules tree / enrollment eligibility |
+| Dealer tenant | B2B **partner_id / tenant_id** on every key |
 
 ---
 
-## 3. Scenario B — OEM co-op policy (policy engine LLD)
+## 2. Scenario: “200k marketing send” (they ask) → you answer with P2
 
-Reddit Tekion drive (Apr 2026): **ALLOW/DENY** from AND/OR tree.
+**Do not** design a fictional ESP.
 
-Example rule:
+**Do:**
 
-```
-(creditScore >= 720 AND accountStatus == "Active")
-OR (receivableDays < 30)
-```
-
-TAMC co-op rule (different fields):
-
-```
-(modelYear >= 2024 AND make == "OEM_X")
-AND (geo IN approved_states)
-AND NOT (vin IN excluded_list)
-```
-
-### Implementation
-
-```java
-public enum Decision { ALLOW, DENY }
-
-public interface PolicyPort {
-  Decision evaluate(String policyId, Map<String, Object> facts, int policyVersion);
-}
-```
-
-- Store policy as **versioned JSON tree** in Postgres.
-- Evaluation is **pure function**—no side effects.
-- Log: `policyId`, `version`, `decision`, `launchId`—not PII in log line.
-
-Same pattern as **credit check adapter** on enrollment.
+1. Clarify: “I’ll use the **bulk order engine I architected: 10,000+ lines per payload**, same mechanics at higher scale.”
+2. NFR: accept p99, zero duplicate lines, dropout metric, 99.99% platform context (**P1**).
+3. Draw: APIGEE (**P8**) → bulk API → outbox → Rabbit → workers → PaymentMs/Order/PEGA.
+4. Idempotency: partner key + `(batch_id, line_id)`.
+5. Analogy (one sentence): “A recipient is a line; ESP is order-domain handoff; suppress is line cancelled when inventory/rules change.”
 
 ---
 
-## 4. Scenario C — Spend ledger (payment idempotency forum Q)
+## 3. Scenario: Policy engine (Tekion Reddit, Apr 2026)
 
-Co-op budget $10,000.
+**Their sample:** creditScore, accountStatus, receivableDays.
 
-1. **Reserve** $0.05 per attempted send in same TX as `delivery_attempt` insert.
-2. **Commit** on ESP ACK.
-3. **Release** on hard failure after max retries.
-4. **Adjust** when Google invoice CSV disagrees (reconciliation job).
+**Your answer:**
 
-Unique: `(tenant_id, attempt_id, entry_type)`.
+> “On **SMB enrollment** we evaluated **automated credit** and adaptive auth with explicit ALLOW/DENY style outcomes before activation. I’d model policy as a versioned condition tree—same as Tekion’s sample—with evaluation pure function over a snapshot, stored decision on the enrollment row (**P5**). PEGA case (**P6**) held exceptions reps resolved.”
 
----
-
-## 5. AI / GenAI integration (hexagonal)
-
-### 5.1 Two ports (never one “AIService”)
-
-| Port | Latency | On failure |
-|------|---------|------------|
-| `ScoringPort` | ≤ 25 ms in send path | Rules ranker fallback |
-| `CreativePort` | seconds–minutes, async | Stay DRAFT; no send |
-
-### 5.2 Creative path (maps to Agentic Universe)
-
-1. `CreativePort.submit(request)` → job id.
-2. Adapter calls LLM with **redacted** prompt; stores `modelId`, `promptVersion`, `inputHash`.
-3. Status `PENDING_APPROVAL`.
-4. Human approves in UI.
-5. Campaign stores `approvedCreativeArtifactId` only.
-6. Send worker loads artifact by id—**no LLM on send**.
-
-### 5.3 Scoring path
-
-- Precompute scores at snapshot build time → store next to member (best latency).
-- Or inline call with **circuit breaker** + timeout.
-
-### 5.4 SRE triaging vs send path
-
-LangGraph multi-hop over OpenSearch/Git/Jira/K8s is **minutes** and **human-reviewed**.
-
-Never that topology on “should we send this SMS now.”
-
-### 5.5 RAG eval pipeline (Staff AI interview)
-
-1. Golden set of (question, expected_citations).
-2. Retrieve passages; generate answer.
-3. Score: groundedness, citation match, safety.
-4. Run offline in CI; block model version promotion if regression.
-
-You already score **groundedness, citations, unsafe actions** in GenAI eval work—cite that.
+Optional Java: `PolicyPort.evaluate(policyId, facts)` next to `CreditCheckPort`.
 
 ---
 
-## 6. Java module layout (decoupled intelligence)
+## 4. Scenario: Payment retry (Tekion Mar 2026)
 
-```
-campaign-domain/
-  ScoringPort.java
-  CreativePort.java
-  DeliveryPort.java
-  PolicyPort.java
+Answer entirely with **P3 PaymentMs** + **P2** line worker:
 
-campaign-adapters/
-  LlmScoringAdapter.java
-  RulesScoringAdapter.java
-  SendGridDeliveryAdapter.java
-
-campaign-api/
-  LaunchController.java
-```
-
-Domain module `pom.xml` has **no** OpenAI, LangChain, or Kafka dependencies.
+- `idempotency_key` unique
+- States CREATED → CAPTURED
+- Retry returns stored row
+- Payment captured, order domain fails → line FAILED, batch continues; compensating refund workflow
 
 ---
 
-## 7. Whiteboard exercise (20 min)
+## 5. Scenario: Service-center booking (Tekion senior HLD)
 
-**Prompt:** 200k launch, sold VIN at T+5min, co-op budget, SMS consent fail-closed.
+> “Concurrent booking is the same concurrency class as **payment reserve** and **case version** on our platform: one conditional SQL update or optimistic version, not check-then-set in Java. Search nearby centers is a read model like **ConfigMs catalog** cache (**P3**).”
 
-Draw:
+Then draw slot/booking generically if they insist.
 
-1. Services (5 boxes max).
-2. Two idempotency keys (launch, attempt).
-3. One conditional SQL (budget or cap).
-4. One metric alert.
+---
 
-Compare to [04-api-and-system-design.md](./04-api-and-system-design.md).
+## 6. Scenario: AI agent platform (Staff AI Tekion)
+
+**This is your strongest match—use P9 + P10, not ordering.**
+
+| Their requirement | Your system |
+|-------------------|-------------|
+| Long-running tools | **P10** LangGraph nodes (logs, Git, Jira, K8s) |
+| Human approval mid-run | **P9** `AWAITING_APPROVAL` |
+| Fire-and-forget vs watch | **P9** run id + status API |
+| Crash-safe | **P9** Postgres `current_step` + version |
+| Sandbox pool | **P9** worker pool limits (conceptual) |
+| RAG eval | GenAI eval rubric on your resume (groundedness, citations) |
+
+---
+
+## 7. Scenario: Car service booking (automotive flavored)
+
+Bridge only:
+
+> “Vehicle **service slot** booking parallels **add-a-line enrollment** slots in peak: concurrent updates on case/enrollment version (**P6/P5**), read-heavy search cached like **ConfigMs**.”
+
+---
+
+## 8. Hexagonal Java (JD) — your ports today
+
+| Port | Your adapter |
+|------|----------------|
+| `CreditCheckPort` | Automated credit (**P5**) |
+| `OcrScanPort` | ScanID (**P5**) |
+| `CasePort` | PEGA (**P6**) |
+| `QuotePort` | Legacy quote (**P7**) |
+| `McpToolPort` | **P9** MCP servers |
+| `LogEvidencePort` | **P10** OpenSearch |
+
+Campaign/ESP ports are **the same pattern** you already shipped.
+
+---
+
+## 9. Whiteboard drill (20 min)
+
+**Prompt:** “Design marketing launch.”
+
+**Response:** “I’ll design **bulk batch processing for B2B ordering**—my production system.” Then draw P2. Add P5 adapter for gating. Close with Tekion analogy table (section 1).
+
+---
+
+## 10. What not to do
+
+- Invent Aerospike war stories.
+- Describe LLM on GraphQL submit path (**P1** used bounded adapters, not GPT).
+- Lead with Agentic Universe when they asked Java ordering architect—lead **P1/P2**, then **P9** for AI.
