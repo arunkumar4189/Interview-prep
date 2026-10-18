@@ -59,17 +59,17 @@ Is the user waiting for the result in the same HTTP request?
 
 ## 4. Distributed transactions: what not to do
 
-**Two-phase commit across Postgres + Kafka + Google Ads** — operationally fragile; interviewers want **sagas / outbox**.
+**Two-phase commit across Cassandra + Rabbit + PEGA** — operationally fragile; we used **outbox + sagas**.
 
-### Outbox (preferred for launch)
+### Outbox (preferred for bulk accept — P2)
 
-1. TX1: `launch` + `outbox` commit.
-2. Relay publishes to Kafka.
-3. Consumer: idempotent `delivery_attempt` insert → call ESP.
+1. TX1: `bulk_batch` + `outbox` commit.
+2. Relay publishes to **RabbitMQ**.
+3. Consumer: idempotent `(batch_id, line_id)` → order domain + **PaymentMs (P3)**.
 
-### Saga (payment + inventory + notify)
+### Saga (payment + order + PEGA — P2/P3/P6)
 
-If payment succeeds and inventory fails:
+If payment succeeds and order/PEGA step fails:
 
 - **Do not** silently delete payment row.
 - States: `PAYMENT_CAPTURED`, `INVENTORY_FAILED`, compensating action (refund job) or manual queue.
