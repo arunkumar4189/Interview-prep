@@ -13,6 +13,8 @@
 
 **Location:** Chennai.
 
+**Examples in this guide:** All tied to your projects **P1–P12** — see [11-your-projects-catalog.md](./11-your-projects-catalog.md).
+
 ---
 
 ## Skills & Qualifications → study file

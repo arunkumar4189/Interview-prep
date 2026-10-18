@@ -6,9 +6,9 @@
 
 Not “many small REST apps.” It means:
 
-1. **Independent deployability** — change consent service without redeploying campaign UI BFF.
+1. **Independent deployability** — change **PaymentMs (P3)** without redeploying **CartMs** or the GraphQL aggregate (**P1**).
 2. **Data ownership** — each service owns its tables; no shared DB as integration.
-3. **Failure isolation** — ESP down does not take down campaign CRUD.
+3. **Failure isolation** — PEGA/credit down does not take down bulk batch accept (**P2**).
 4. **Explicit contracts** — APIs + events with versioning.
 
 **Anti-pattern:** 40 services sharing one Oracle schema—you have distributed monolith coupling.
@@ -29,7 +29,7 @@ Map every Tekion box to this:
 
 **Strangler fig:** Quote-to-order did not rewrite legacy in one night—adapter + new path + retire manual step.
 
-TAMC strangler: start with **campaign + consent + one channel adapter**; add VIN suppress when inventory feed exists.
+**Your strangler (P7):** quote-to-order adapter first; retire manual re-key. Tekion analogy: one channel at a time—same pattern.
 
 ---
 
@@ -47,7 +47,7 @@ Is the user waiting for the result in the same HTTP request?
 
 | Operation | Sync/async | Why |
 |-----------|------------|-----|
-| Create campaign draft | Sync | Small DB write |
+| **P3** cart/config read | Sync | Small DB read (often cached) |
 | **P2** bulk 10k+ lines | Async | RabbitMQ fan-out |
 | **P4** large cart validate | Async | 202 + job |
 | **P5** credit / OCR / auth | Sync with tight budget | Fail-closed on activation |

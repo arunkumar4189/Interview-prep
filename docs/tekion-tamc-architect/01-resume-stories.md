@@ -90,7 +90,7 @@ Be ready: *how was 99.99% measured?* (window, scope, shared vs team-owned SLO). 
 
 ### Kafka mapping (honest)
 
-“I operated this on **RabbitMQ**. On **Kafka** I would partition by `tenantId:campaignId`, commit offset **after** idempotent DB write, and use a DLQ topic. Producer idempotence does **not** stop double email at the ESP.”
+“I operated this on **RabbitMQ**. On **Kafka** I would partition by `tenantId:batchId`, commit offset **after** idempotent line write, and use a DLQ topic. Producer idempotence does **not** stop duplicate order creation at the domain service.”
 
 ---
 
@@ -172,6 +172,6 @@ Prepare **written** answers for:
 
 > I’m a Distinguished Engineer at Verizon in Chennai. For four years I was principal architect on B2B SMB ordering: Spring Reactive, GraphQL, Cassandra, and a bulk engine that accepts **more than 10,000 orders per payload** on RabbitMQ. We held **99.99%** by tracking **order dropout**, not just CPU.  
 > I still ship code—this year **Agentic Universe** (FastAPI, MCP, Postgres, human approval) and an **SRE triaging** service with LangGraph over OpenSearch and deploy/ticket context.  
-> For Tekion TAMC I’d use the same rule I used on ordering: **commit campaign, consent, and spend locally**; scoring, creative models, and ESPs are **adapters** with timeouts and defined failures.
+> For Tekion TAMC I’d use the same rule I used on ordering: **commit the batch/order and payment intent locally**; credit, PEGA, quote, and models are **adapters** with timeouts and defined failures.
 
 Stop. Let them pick a thread.
