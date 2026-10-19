@@ -32,6 +32,7 @@ Detailed interview prep for **Architect, Tekion Automotive Marketing Cloud (TAMC
 | [09-tamc-domain-scenarios.md](./09-tamc-domain-scenarios.md) | Tekion prompts → your projects |
 | [10-reported-tekion-questions.md](./10-reported-tekion-questions.md) | **Detailed** forum Q&A + scripts (Kafka, payments, HLD/LLD, DSA, behavioral) |
 | [11-your-projects-catalog.md](./11-your-projects-catalog.md) | **Master index** |
+| [12-dms-system-design-tekion-like.md](./12-dms-system-design-tekion-like.md) | **Cloud-native DMS** (inventory, deals, service, TAMC events) |
 
 ## One sentence to keep
 
