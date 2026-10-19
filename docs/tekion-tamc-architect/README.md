@@ -30,7 +30,7 @@ Detailed interview prep for **Architect, Tekion Automotive Marketing Cloud (TAMC
 | [07-cloud-cicd-observability.md](./07-cloud-cicd-observability.md) | **P1/P2**, **P8**, **P10** |
 | [08-good-to-have-stack.md](./08-good-to-have-stack.md) | **P2** Rabbit, **P3** Redis, **P10** OpenSearch |
 | [09-tamc-domain-scenarios.md](./09-tamc-domain-scenarios.md) | Tekion prompts → your projects |
-| [10-reported-tekion-questions.md](./10-reported-tekion-questions.md) | Forum Q&A anchored to P1–P12 |
+| [10-reported-tekion-questions.md](./10-reported-tekion-questions.md) | **Detailed** forum Q&A + scripts (Kafka, payments, HLD/LLD, DSA, behavioral) |
 | [11-your-projects-catalog.md](./11-your-projects-catalog.md) | **Master index** |
 
 ## One sentence to keep
